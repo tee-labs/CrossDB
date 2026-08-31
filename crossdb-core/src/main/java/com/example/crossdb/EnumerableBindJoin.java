@@ -191,7 +191,9 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
         Expressions.constant(getJoinType() == JoinRelType.RIGHT),
         Expressions.constant(getJoinType() == JoinRelType.FULL),
         Expressions.constant(leftWidth),
-        Expressions.constant(getJoinType() == JoinRelType.SEMI),
+        // SEMI/ANTI 都只输出外表行（BindJoinExec 约定 anti 须与 semi 同设）
+        Expressions.constant(getJoinType() == JoinRelType.SEMI
+            || getJoinType() == JoinRelType.ANTI),
         Expressions.constant(getJoinType() == JoinRelType.ANTI)));
     final PhysType physType =
         PhysTypeImpl.of(implementor.getTypeFactory(), getRowType(), JavaRowFormat.ARRAY);

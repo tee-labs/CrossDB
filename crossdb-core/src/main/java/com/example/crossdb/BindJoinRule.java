@@ -151,6 +151,11 @@ class BindJoinRule extends RelOptRule {
     }
     int[] leftKeys = pairs.keySet().stream().mapToInt(Integer::intValue).toArray();
     int[] rightKeys = pairs.values().stream().mapToInt(Integer::intValue).toArray();
+    // 无等值连接对（如 NOT IN 展开出的 TRUE 条件 Join、跨库笛卡尔积）时改写会把
+    // 空 key 绑进 IN 下推 SQL（WHERE () 直接报错），必须退回原生计划
+    if (leftKeys.length == 0) {
+      return null;
+    }
 
     if (!(rightEnum instanceof JdbcToEnumerableConverter converter)) {
       return null;

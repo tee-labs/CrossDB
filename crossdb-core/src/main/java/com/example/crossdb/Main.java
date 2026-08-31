@@ -4,6 +4,7 @@ import org.h2.jdbcx.JdbcDataSource;
 
 import java.sql.Connection;
 import java.sql.ResultSet;
+import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
@@ -340,8 +341,76 @@ public class Main {
       check(names.equals(List.of("alice", "bob")), "EXISTS 应只保留有订单的用户: " + names);
     }
 
-    System.out.println("SELF-CHECK OK: WHERE/LIMIT 执行器、Bind Join（LEFT/RIGHT/FULL/SEMI/复合键/流式）、"
-        + "Top-N 与传递谓词下推、熔断、级联取消、超时传播、safeMode、explain/analyze 全部通过");
+    System.out.println("== Q: NOT EXISTS 反连接（ANTI Bind Join，IN 下推）+ NOT IN 回退");
+    List<String> notExistsSqls = new ArrayList<>();
+    try (CrossDb db = new CrossDb()) {
+      db.register("userdb", users)
+          .register("orderdb", recording(orders, notExistsSqls, new ArrayList<>()));
+      List<String> names = new ArrayList<>();
+      try (ResultSet rs = db.query(
+          "SELECT u.name FROM userdb.users u WHERE NOT EXISTS "
+          + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id) ORDER BY u.name")) {
+        while (rs.next()) {
+          names.add(rs.getString(1));
+        }
+      }
+      check(names.equals(List.of("carol")), "NOT EXISTS 应只保留无订单的用户: " + names);
+      check(notExistsSqls.size() == 1 && notExistsSqls.get(0).contains(" IN ("),
+          "orders 侧应只收到 1 条 IN 下推查询: " + notExistsSqls);
+      List<String> notInNames = new ArrayList<>();
+      try (ResultSet rs = db.query(
+          "SELECT u.name FROM userdb.users u WHERE u.id NOT IN "
+          + "(SELECT o.user_id FROM orderdb.orders o) ORDER BY u.name")) {
+        while (rs.next()) {
+          notInNames.add(rs.getString(1));
+        }
+      }
+      check(notInNames.equals(List.of("carol")), "NOT IN 走原生计划结果应正确: " + notInNames);
+      System.out.println("   内表收到: " + notExistsSqls.get(0).replace('\n', ' '));
+    }
+
+    System.out.println("== R: 只读硬化（DML 拒绝，SELECT/WITH 放行）");
+    try (CrossDb db = new CrossDb()) {
+      db.register("userdb", users);
+      try {
+        db.query("DELETE FROM userdb.users WHERE id = 1");
+        check(false, "DELETE 必须被拒绝");
+      } catch (SQLException e) {
+        check(String.valueOf(e.getMessage()).contains("只读"), "只读拦截信息: " + e.getMessage());
+        System.out.println("   拦截: " + e.getMessage());
+      }
+      try (ResultSet rs = db.query(
+          "WITH big AS (SELECT id FROM userdb.users WHERE id >= 2) "
+          + "SELECT COUNT(*) AS c FROM big")) {
+        rs.next();
+        check(rs.getInt(1) == 2, "WITH CTE 查询应放行");
+      }
+    }
+
+    System.out.println("== S: UNION ALL 分片合并 + Top-N 归并下推（每分支 ORDER BY+LIMIT）");
+    List<String> shardSqls = new ArrayList<>();
+    try (CrossDb db = new CrossDb()) {
+      db.register("userdb", recording(users, shardSqls, new ArrayList<>()))
+          .register("orderdb", recording(orders, shardSqls, new ArrayList<>()));
+      List<Integer> ids = new ArrayList<>();
+      try (ResultSet rs = db.query(
+          "SELECT id FROM (SELECT id FROM userdb.users UNION ALL "
+          + "SELECT id FROM orderdb.orders) t ORDER BY id DESC LIMIT 3")) {
+        while (rs.next()) {
+          ids.add(rs.getInt(1));
+        }
+      }
+      check(ids.equals(List.of(103, 102, 101)), "分片 Top-N 应返回 [103,102,101]: " + ids);
+      long pushed = shardSqls.stream()
+          .filter(s -> s.contains("ORDER BY") && (s.contains("LIMIT") || s.contains("FETCH")))
+          .count();
+      check(pushed == 2, "两个分支源库 SQL 都应下推 ORDER BY + LIMIT/FETCH: " + shardSqls);
+      System.out.println("   users 分支: " + shardSqls.get(0).replace('\n', ' '));
+    }
+
+    System.out.println("SELF-CHECK OK: WHERE/LIMIT 执行器、Bind Join（LEFT/RIGHT/FULL/SEMI/ANTI/复合键/流式）、"
+        + "Top-N 与传递谓词下推、分片 UNION ALL Top-N、只读硬化、熔断、级联取消、超时传播、safeMode、"
+        + "explain/analyze 全部通过");
   }
 
   private static final String JOIN_SQL_FOR_REPORT =

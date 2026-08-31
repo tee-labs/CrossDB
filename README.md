@@ -1,55 +1,31 @@
 # crossdb — 基于 Apache Calcite 的跨库 SQL 引擎
 
 把多个 JDBC 数据库注册成 schema，用一条 SQL 跨库查询。
-定位：**OLTP 点查 / 运维排障** —— 低延迟、低网络 I/O、防慢查与爆内存，纯关系型库、极简开箱即用。
+定位：**OLTP 点查 / 运维排障** —— 低延迟、低网络 I/O、防慢查与爆内存，纯关系型库、极简开箱即用、只读。
 
-- 同库的过滤/投影/JOIN/聚合由 Calcite `JdbcRules` 下推成各库方言 SQL（内置 MySQL/PostgreSQL/Oracle/DB2 等方言翻译）；
-- 跨库 JOIN 走 **Bind Join**：驱动侧 key 分批 `IN` 下推到内表所在库、并发拉取、本地 hash 探测（`BindJoinRule` + `EnumerableBindJoin` + `BindJoinExec`），支持 **INNER/LEFT/RIGHT/FULL/SEMI** 与 **复合键（tuple-IN）**；RIGHT 交换内外侧按 LEFT 形态执行（行型恢复原始列序），FULL 在外表耗尽后对内表补一次分块 `NOT IN` 反连接；模式不匹配（复合/非等值残余条件、右表无法整体下推、同库 JOIN 等）时自动退回 Calcite 原生计划；
-- **SEMI 半连接**（`EXISTS` / `IN` 子查询去相关后的形态）走 IN 下推：内表只回传命中 key 的行，网络消耗最小化；`NOT EXISTS` 去相关后是 LEFT JOIN + IS NULL 形态，暂走原生计划（结果正确，见路线图）；
-- **IN 列表自适应分片**：单批 key 超过 1000（Oracle IN 列表上限）自动拆为 `IN (...) OR IN (...)`，任意方言安全；
-- **流水线式流式执行**：外表游标按窗口流式读取、每批异步并发拉取，输出流式 yield——驱动侧内存 O(batchSize × parallelism)，不再全量驻内存；外表按 join key 有序时（排序下推场景）自动**每窗口淘汰**哈希旧条目；
-- **Top-N 下推**：`ORDER BY + LIMIT` 且排序列在驱动侧时，一起下推进驱动侧源库 SQL，网络传输降为 O(LIMIT) 量级；
+## 核心机制一览
+
+- **同库下推**：单库内的过滤/投影/JOIN/聚合/排序由 Calcite `JdbcRules` 整体下推成该库方言 SQL（内置 MySQL/PostgreSQL/Oracle/DB2/H2 等方言翻译），跨库查询对每个源库都只下发「完整的一条 SQL」；
+- **Bind Join（跨库 JOIN）**：外表 key 分批 `IN` 下推到内表所在库、虚拟线程并发拉取、本地 hash 探测（`BindJoinRule` + `EnumerableBindJoin` + `BindJoinExec`），支持 **INNER/LEFT/RIGHT/FULL/SEMI/ANTI** 与**复合键（tuple-IN）**；RIGHT 交换内外侧按 LEFT 形态执行（行型恢复原始列序），FULL 在外表耗尽后对内表补一次分块 `NOT IN` 反连接；
+- **SEMI/ANTI 半连接**：`EXISTS` / `IN` 子查询走 SEMI Bind Join，`NOT EXISTS` 走 ANTI Bind Join（识别去相关后的「LEFT JOIN + 常量标记列 IS NULL」形态）——内表只回传命中 key 的行，网络消耗最小化；`NOT IN` 被 Calcite 展开为「计数聚合」形态、无等值连接对，自动走原生计划（结果正确）；
+- **Top-N 下推**：`ORDER BY + LIMIT` 且排序列在驱动侧时一起下推进驱动侧源库 SQL，网络传输降为 O(LIMIT) 量级；
+- **分片合并 Top-N**：`UNION ALL` 跨库合并 + `ORDER BY + LIMIT` 时，把排序与裁剪下推进**每个分支**的源库 SQL（每库只回 offset+fetch 行），本地归并保持语义，网络传输 O((offset+fetch) × 分支数)；
 - **传递谓词下推**：`ON a.t = b.t` + `WHERE a.t = 1` 自动把 `b.t = 1` 补到内表侧源库，从源头减少网络传输；
-- 所有源库拉取带 **fetchSize 流式读取**、**行数熔断** 与 **queryTimeout 超时传播**（见下）；内表并发拉取用 **JDK 21 虚拟线程**（按 `parallelism` 限流）。
+- **流水线式流式执行**：外表游标按窗口流式读取、每批异步并发拉取，输出流式 yield——驱动侧内存 O(batchSize × parallelism)，不再全量驻内存；外表按 join key 有序时（排序下推场景）自动**每窗口淘汰**哈希旧条目；
+- **IN 列表自适应分片**：单批 key 超过 1000（Oracle IN 列表上限）自动拆为 `IN (...) OR IN (...)`，任意方言安全；
+- **全链路安全护栏**：所有源库拉取带 fetchSize 流式读取、行数熔断、queryTimeout 超时传播与级联取消；内表并发拉取用 **JDK 21 虚拟线程**（按 `parallelism` 限流）；引擎强制只读，safeMode 可进一步拦截全表拉取。
 
 自包含子项目（Maven 多模块：`crossdb-core` + `crossdb-spring-boot-starter`），与本仓库其他部分无关，可随时拆成独立仓库。需要 **JDK 21+** 构建。
 
-## 运行自检与单元测试
+## 快速开始
 
 ```bash
-mvn test                                                     # 47 个 JUnit 单元测试（两个模块）
+mvn test                                                     # 53 个 JUnit 单元测试（两个模块）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
+# 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
 ```
 
-单元测试覆盖：`Guarded` 熔断与超时/统计（阈值放行 / 超限拒绝 / fetchSize、maxRows、setQueryTimeout、SQL 与行数记录、在途语句取消注册表）、`BindJoinExec` 流式执行（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片）、`CrossDb` 端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS 语义、复合键跨库、Top-N 下推、传递谓词下推、safeMode 拦截、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝）。自检 Main 覆盖同场景的运行时串联验证。加 `-Dcrossdb.debug=true` 可打印物理计划与规则匹配过程。
-
-## 查询特性
-
-| 特性 | 说明 |
-| --- | --- |
-| Bind Join | 跨库 INNER/LEFT/RIGHT/FULL 等值 JOIN 自动改写：外表 key 每批 `batchSize` 个去重后以 `IN (?)` 下推内表库，`parallelism` 个虚拟线程并发拉取，本地 hash 探测；LEFT/FULL 时未匹配的外表行补 NULL，FULL 再对内表补一次分块 `NOT IN` 反连接；RIGHT 交换内外侧执行、行型保持原始 [左 ++ 右] |
-| 复合键 tuple-IN | 多列等值键（`ON a.k1=b.k1 AND a.k2=b.k2`）在 H2/MySQL/PostgreSQL/Oracle 生成 `(k1,k2) IN ((?,?),...)`，其余方言降级为 `(k1=? AND k2=?) OR ...`；单批 key 超 1000（Oracle IN 上限）自动拆为 `IN (...) OR IN (...)` |
-| EXISTS 半连接 | `EXISTS` / `IN` 子查询去相关后的 SEMI Join 走 Bind Join IN 下推，内表只回传命中 key；`NOT EXISTS` 暂走原生计划（结果正确） |
-| Top-N 下推 | `ORDER BY <驱动侧列> + LIMIT` 下推进驱动侧源库 SQL（ORDER BY + FETCH/LIMIT），源库只返回 LIMIT 行；本地仍保留 Sort/Limit 保证语义 |
-| 传递谓词下推 | 驱动侧 join key 上的常量条件自动补到内表侧源库 SQL |
-| 哈希窗口淘汰 | 驱动侧按 join key 有序（如排序下推后的计划）时，每窗口合并前淘汰更小的 key，内表哈希内存从 O(distinct keys) 降为 O(窗口 keys)；检测保守，宁可不淘汰不错杀匹配 |
-| 行数熔断 | 每个 `DataSource` 被代理：语句级 `maxRows = 阈值 + 1`（驱动侧封顶），结果集拉取计数超阈值即抛 `SQLException` 拒绝执行；对最终结果、每个源库扫描和 FULL 反连接同样生效 |
-| 流式拉取 | 源库语句统一 `setFetchSize(fetchSize)`，逐批读取；Bind Join 外表流式读窗口、输出流式 yield，驱动侧不驻全量 |
-| 超时传播 | `queryTimeout` 传播到每条源库语句，慢查询由 JDBC 驱动在源库侧取消，防连接池耗尽 |
-| 级联取消 | `db.cancel()`（外部线程调用）遍历在途源库语句逐个 `Statement.cancel()`，主动掐断慢查询；语句关闭自动注销注册表 |
-| safeMode | `db.safeMode()` 后，计划中出现「无过滤条件的源库全表拉取」直接抛 `CrossDbUnsafeQueryException`（Bind Join 内表例外，其必带 key IN 过滤；聚合视为有归约）——OLTP 零容忍全表拉取 |
-| explain / analyze | `explain(sql)` 返回优化后物理计划；`analyze(sql)` 执行并输出各源库实际下发的 SQL、每库网络行数、Bind Join 批次与拉取行数 |
-
-配置（构造参数，默认 `1000 / 1_000_000 / 500 / 4 / 0`）：
-
-```java
-try (CrossDb db = new CrossDb(fetchSize, rowLimit, bindBatchSize, bindParallelism,
-        queryTimeoutSeconds /* 0=不限 */).safeMode() /* 可选 */) { ... }
-```
-
-注意：`query(sql)` 返回的 `ResultSet` 只应消费一次（与 JDBC 语义一致），重复迭代会重新下发源库查询；同一 `CrossDb` 同一时刻只支持一条并发查询（CalciteConnection 本身不并发安全），并发统计会串场。
-
-## 接入真实 MySQL / PostgreSQL
+第一个跨库查询（H2 内存库演示，真实库见下）：
 
 ```java
 try (CrossDb db = new CrossDb()) {
@@ -58,18 +34,68 @@ try (CrossDb db = new CrossDb()) {
     ResultSet rs = db.query(
         "SELECT u.name, SUM(o.amount) FROM shop.orders o " +
         "JOIN crm.users u ON u.id = o.user_id GROUP BY u.name");
+    while (rs.next()) { /* 消费一次；结果集是流式一次性迭代，不可 reset */ }
 }
 ```
 
-驱动已在 pom.xml 里（mysql-connector-j / postgresql），生产建议每个目标库一个独立 HikariCP 连接池（`Guarded` 代理是透明的，直接包住 HikariDataSource 传入即可）。Schema 元数据由 Calcite `JdbcSchema` 在首次用到表时懒加载并缓存于 `CrossDb` 生命周期内，无需额外配置。
+驱动已在 pom.xml 里（mysql-connector-j / postgresql）。生产建议每个目标库一个独立 HikariCP 连接池（`Guarded` 代理是透明的，直接包住 HikariDataSource 传入即可）。Schema 元数据由 Calcite `JdbcSchema` 在首次用到表时懒加载并缓存于 `CrossDb` 生命周期内，无需额外配置。
 
-## Bind Join 当前边界（触发条件）
+## 查询特性
 
-- INNER/LEFT/RIGHT/FULL/SEMI JOIN，连接条件**全部**为跨侧等值对（支持多列复合键），无残余非等值条件（有则退回原生计划）；RIGHT 交换内外侧执行，FULL 的反连接会把外表 distinct key 全量攒内存（受行数熔断封顶）；SEMI 仅接受纯等值去相关形态（如 Calcite 生成的「key IS NOT NULL」附加条件自动忽略）；
-- 内表可整体下推为一条 JDBC SQL（Scan/Filter/Project 链，且输出列名唯一）；
-- 左右两侧来自**不同**已注册库（同库 JOIN 走原生方言下推，不抢）；
-- Top-N 要求排序列全部属于 join 的左操作数（驱动侧），仅 INNER/LEFT；
-- key 经 JDBC `getObject/setObject` 传递；哈希淘汰仅在驱动侧按 key 有序时启用。
+| 特性 | 说明 |
+| --- | --- |
+| Bind Join | 跨库 INNER/LEFT/RIGHT/FULL/SEMI/ANTI 等值 JOIN 自动改写：外表 key 每批 `batchSize` 个去重后以 `IN (?)` 下推内表库，`parallelism` 个虚拟线程并发拉取，本地 hash 探测；LEFT/FULL 未匹配外表行补 NULL，FULL 再对内表补一次分块 `NOT IN` 反连接；RIGHT 交换内外侧执行、行型保持原始 [左 ++ 右]；SEMI/ANTI 只输出外表行（内表只回传命中 key） |
+| 复合键 tuple-IN | 多列等值键（`ON a.k1=b.k1 AND a.k2=b.k2`）在 H2/MySQL/PostgreSQL/Oracle 生成 `(k1,k2) IN ((?,?),...)`，其余方言降级为 `(k1=? AND k2=?) OR ...`；单批 key 超 1000（Oracle IN 上限）自动拆为 `IN (...) OR IN (...)` |
+| EXISTS / NOT EXISTS | `EXISTS`/`IN` 子查询去相关后的 SEMI Join 走 IN 下推；`NOT EXISTS` 去相关为「LEFT JOIN + 常量标记列 IS NULL」形态，由 `AntiBindJoinFilterRule` 改写为 ANTI Bind Join（投影只引用外表列时生效）；`NOT IN` 展开为计数聚合形态、无等值连接对，走原生计划（结果正确） |
+| Top-N 下推 | `ORDER BY <驱动侧列> + LIMIT` 下推进驱动侧源库 SQL（ORDER BY + FETCH/LIMIT），源库只返回 LIMIT 行；本地仍保留 Sort/Limit 保证语义 |
+| 分片合并 Top-N | `UNION ALL` 多库合并 + `ORDER BY + LIMIT`（`ShardTopNRule`）：每个分支源库 SQL 带上 ORDER BY + 裁剪（每库只回 offset+fetch 行），本地归并排序后按原 offset/fetch 裁剪；仅限 UNION ALL（UNION 去重语义不可按分支裁剪） |
+| 传递谓词下推 | 驱动侧 join key 上的常量条件自动补到内表侧源库 SQL（去重：内表已有等值过滤不重复包裹） |
+| 哈希窗口淘汰 | 驱动侧按 join key 有序（如排序下推后的计划）时，每窗口合并前淘汰更小的 key，内表哈希内存从 O(distinct keys) 降为 O(窗口 keys)；检测保守，宁可不淘汰不错杀匹配 |
+| 行数熔断 | 每个 `DataSource` 被代理：语句级 `maxRows = 阈值 + 1`（驱动侧封顶），结果集拉取计数超阈值即抛 `SQLException` 拒绝执行；对最终结果、每个源库扫描和 FULL 反连接同样生效 |
+| 流式拉取 | 源库语句统一 `setFetchSize(fetchSize)`，逐批读取；Bind Join 外表流式读窗口、输出流式 yield，驱动侧不驻全量 |
+| 超时传播 | `queryTimeout` 传播到每条源库语句，慢查询由 JDBC 驱动在源库侧取消，防连接池耗尽 |
+| 级联取消 | `db.cancel()`（外部线程调用）遍历在途源库语句逐个 `Statement.cancel()`，主动掐断慢查询；语句关闭自动注销注册表 |
+| 只读硬化 | 仅放行查询语句（SELECT、UNION/INTERSECT/EXCEPT、ORDER BY/LIMIT 与 WITH CTE 包裹）；INSERT/UPDATE/DELETE/MERGE/DDL/SET 等在解析层直接拒绝——写入请直接操作各源库 |
+| safeMode | `db.safeMode()` 后，计划中出现「无过滤条件的源库全表拉取」直接抛 `CrossDbUnsafeQueryException`（Bind Join 内表例外，其必带 key IN 过滤；聚合视为有归约）——OLTP 零容忍全表拉取 |
+| explain / analyze | `explain(sql)` 返回优化后物理计划；`analyze(sql)` 执行并输出各源库实际下发的 SQL、每库网络行数、Bind Join 批次与拉取行数（注意：analyze 会消费整个结果集） |
+
+## 典型场景与执行路径
+
+| 场景 | SQL 形态 | 执行路径 |
+| --- | --- | --- |
+| 跨库 JOIN 点查 | `... FROM a.t JOIN b.t ON ... WHERE a.pk = 1` | 外表过滤下推 → Bind Join 内表 IN 下推（小 IN 查询，命中索引） |
+| 差集排查 | `... WHERE NOT EXISTS (SELECT 1 FROM b.t WHERE ...)` | ANTI Bind Join：内表按外表 key IN 下推，只保留无匹配的外表行 |
+| 存在性排查 | `... WHERE EXISTS (SELECT 1 FROM b.t WHERE ...)` | SEMI Bind Join：内表 IN 下推，只保留有匹配的外表行 |
+| 最新 N 条（单库驱动侧） | `... JOIN ... ORDER BY a.col LIMIT n` | Top-N 下推：源库只回 N 行 |
+| 最新 N 条（多库分片合并） | `(SELECT ... FROM a.t UNION ALL SELECT ... FROM b.t) ORDER BY ... LIMIT n` | 分片 Top-N：每库回 offset+fetch 行，本地归并 |
+| 多库合并清单 | `SELECT ... FROM a.t UNION ALL SELECT ... FROM b.t` | 各分支整条 SQL 下发，合并输出（行数熔断封顶） |
+| 复合键关联 | `ON a.k1=b.k1 AND a.k2=b.k2` | tuple-IN / OR 降级分批下推 |
+| 同库 JOIN / 单库查询 | 单一 schema 内 | 全部下推方言 SQL，引擎只透传（不抢 Calcite 原生下推） |
+
+## 安全护栏与可观测性
+
+所有注册的 `DataSource` 都被 `Guarded` 动态代理，形成四层防线：
+
+1. **行数熔断**：语句级 `maxRows = rowLimit + 1` + 结果集拉取计数，超阈值抛 `SQLException`（危险 SQL 熔断）；最终结果、每个源库扫描、FULL 反连接全覆盖；
+2. **流式拉取**：统一 `setFetchSize`，驱动侧按窗口流水线消费，不驻全量；
+3. **超时传播**：`queryTimeout > 0` 时传播到每条源库语句，由源库驱动中止执行；
+4. **级联取消**：`db.cancel()` 从任何线程掐断当前查询的全部在途源库语句。
+
+再加两道闸门：
+
+- **只读硬化**：`query/explain/analyze` 只接受查询语句，DML/DDL 在解析层拒绝（中文错误信息），杜绝误用；
+- **safeMode**（可选，`db.safeMode()`）：进一步拒绝「无过滤条件的源库全表拉取」。
+
+观测：`explain(sql)` 看物理计划（是否走了 Bind Join / Top-N 下推），`analyze(sql)` 看每个源库实际下发的 SQL 与网络行数、Bind Join 批次统计——跨库慢查询先 analyze 再定位。
+
+配置（构造参数，默认 `1000 / 1_000_000 / 500 / 4 / 0`）：
+
+```java
+try (CrossDb db = new CrossDb(fetchSize, rowLimit, bindBatchSize, bindParallelism,
+        queryTimeoutSeconds /* 0=不限 */).safeMode() /* 可选 */) { ... }
+```
+
+注意：`query(sql)` 返回的 `ResultSet` 是**一次性流式迭代**（与 JDBC 消费语义一致，不支持 reset/重复消费）；同一 `CrossDb` 同一时刻只支持一条并发查询（CalciteConnection 本身不并发安全），并发统计会串场。多条并发查询请各建一个 `CrossDb` 实例（注册的 DataSource 池是共享的，代价仅为 schema 元数据缓存）。
 
 ## Spring Boot 接入
 
@@ -95,6 +121,22 @@ CrossDbCustomizer crossDbCustomizer(DataSource shopDs) {
 
 已声明 `CrossDb` Bean 时不装配；关闭时自动 `db.close()`（destroyMethod）。
 
+## Bind Join 当前边界（触发条件）
+
+满足以下全部条件才改写为 Bind Join，否则**自动退回 Calcite 原生计划**（回退是正确行为，不是缺陷）：
+
+- INNER/LEFT/RIGHT/FULL/SEMI/ANTI JOIN，连接条件**全部**为跨侧等值对（支持多列复合键），无残余非等值条件（有则退回原生计划）；RIGHT 交换内外侧执行，FULL 的反连接会把外表 distinct key 全量攒内存（受行数熔断封顶）；SEMI/ANTI 要求投影只引用外表列（去相关形态满足）；SEMI/ANTI 的改写还会校验过滤列可追溯到去相关器生成的**常量标记**，用户手写的 `LEFT JOIN + WHERE 右列 IS [NOT] NULL`（INNER/LEFT 语义）不会被误改写；
+- 内表可整体下推为一条 JDBC SQL（单输入算子链——Scan/Filter/Project/Sort/Aggregate——顶层为表扫描，且输出列名唯一）；
+- 存在至少一对等值连接 key（`NOT IN` 展开形态、跨库笛卡尔积无 key 可绑，一律回退原生计划）；
+- 左右两侧来自**不同**已注册库（同库 JOIN 走原生方言下推，不抢）；
+- key 经 JDBC `getObject/setObject` 传递，且两侧 key 列类型一致（类型不一致回退）；
+- 哈希淘汰仅在驱动侧按 key 有序时启用（检测保守，宁可不淘汰不错杀匹配）。
+
+其他下推的边界：
+
+- Top-N 下推要求排序列全部属于 join 的左操作数（驱动侧），仅 INNER/LEFT；
+- 分片 Top-N 仅限 UNION ALL；每个分支须可整体下推为单库 SQL，且必须带 LIMIT（纯 ORDER BY 不推，裁不掉行就没意义）。
+
 ## 路线图（按需再补）
 
 - ~~Statement.cancel 级联取消~~ ✅ `db.cancel()`
@@ -102,7 +144,23 @@ CrossDbCustomizer crossDbCustomizer(DataSource shopDs) {
 - ~~内表哈希表每窗口淘汰~~ ✅ 排序驱动侧自动启用
 - ~~Spring Boot 轻量集成~~ ✅ `crossdb-spring-boot-starter`；Quarkus 需要时再加
 - ~~EXISTS / IN 半连接 IN 下推~~ ✅ SEMI Bind Join（代价恒优于原生半连接）
+- ~~NOT EXISTS 的 ANTI Bind Join~~ ✅ `AntiBindJoinFilterRule` 识别去相关形态改写（顺带修复 ANTI 执行标志接线与空 key 误改写两个缺陷）
 - ~~IN 列表 1000 上限（Oracle）~~ ✅ 自动拆分 `IN (...) OR IN (...)`
 - ~~JDK 21 虚拟线程并发拉取~~ ✅ 替换固定线程池，`parallelism` 限流
-- NOT EXISTS 的 ANTI Bind Join：Calcite 将 NOT EXISTS 去相关为「LEFT JOIN + IS NULL」形态，实验性规则在火山优化器中会引入不可实现的 Jdbc 包装变体（已回退）；需先给引擎接入行数/索引元数据或自定义 RelSubset 约束再做
+- ~~分片 UNION ALL Top-N 归并下推~~ ✅ `ShardTopNRule`
+- ~~只读硬化~~ ✅ 解析层拒绝 DML/DDL
+- NOT IN 的 IN 下推：Calcite 展开为计数聚合形态，需先支持「聚合形态内表」的 key 绑定与三值逻辑（NULL 语义）改写；当前走原生计划，结果正确
+- 行数/索引元数据计价：Bind Join 半连接目前以「策略性零代价」恒优先于原生半连接，如需真实代价比较，先给引擎接入行数/索引元数据或自定义 RelSubset 约束
+- 常用排障 SQL 固化为命名视图（`ViewTable`），跨查询复用
 - 跨库写事务：Calcite 不提供，需引入 XA/Seata 级别的外部组件，超出本项目「纯查询、零侵入」定位，明确不做；有真实诉求时建议在应用层用 Saga/补偿，而不是下沉到查询引擎
+
+## 单元测试覆盖
+
+53 个测试分四组：
+
+- `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
+- `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片）；
+- `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝）；
+- `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
+
+自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。

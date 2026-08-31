@@ -354,13 +354,15 @@ class CrossDbTest {
     }
   }
 
-  @Test void antiJoinNotExistsReturnsCorrectRows() throws Exception {
-    // NOT EXISTS 去相关后是 LEFT JOIN + IS NULL 过滤形态，目前走原生计划
-    //（正确但无 IN 下推；见 README 路线图）。此处锁定语义正确性。
+  @Test void antiJoinNotExistsBindsInnerInsteadOfKeyPull() throws Exception {
+    // NOT EXISTS 去相关为「LEFT JOIN + 常量标记列 IS NULL」，AntiBindJoinFilterRule
+    // 改写为 ANTI Bind Join：内表按外表 key 分批 IN 下推，只回传命中行
+    List<String> orderSqls = Collections.synchronizedList(new ArrayList<>());
+    DataSource orders = Recording.dataSource(Fixtures.ORDERS, orderSqls, new ArrayList<>());
     try (CrossDb db = new CrossDb()) {
       List<String> names = new ArrayList<>();
       try (ResultSet rs = db.register("userdb", Fixtures.USERS)
-          .register("orderdb", Fixtures.ORDERS).query(
+          .register("orderdb", orders).query(
           "SELECT u.name FROM userdb.users u WHERE NOT EXISTS "
           + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id) "
           + "ORDER BY u.name")) {
@@ -369,6 +371,130 @@ class CrossDbTest {
         }
       }
       assertEquals(List.of("carol"), names, "NOT EXISTS 反连接应只保留无订单的用户");
+      assertTrue(orderSqls.stream().anyMatch(s -> s.contains(" IN (")),
+          "orders 侧应收到 IN 下推: " + orderSqls);
+      assertEquals(1, orderSqls.size(), "orders 侧应只收到 1 条 IN 查询: " + orderSqls);
+    }
+  }
+
+  @Test void notInSubqueryFallsBackToNativeAndWorks() throws Exception {
+    // NOT IN 被 Calcite 展开为「计数聚合 + LEFT JOIN」形态：无等值连接对，
+    // Bind Join 不改写（曾有误改写生成 WHERE () 空条件的回归），走原生计划
+    try (CrossDb db = new CrossDb()) {
+      List<String> names = new ArrayList<>();
+      try (ResultSet rs = db.register("userdb", Fixtures.USERS)
+          .register("orderdb", Fixtures.ORDERS).query(
+          "SELECT u.name FROM userdb.users u WHERE u.id NOT IN "
+          + "(SELECT o.user_id FROM orderdb.orders o) ORDER BY u.name")) {
+        while (rs.next()) {
+          names.add(rs.getString(1));
+        }
+      }
+      assertEquals(List.of("carol"), names);
+    }
+  }
+
+  @Test void crossDbCartesianFallsBackToNative() throws Exception {
+    // 跨库笛卡尔积（无连接条件）不能进 Bind Join（无 key 可 IN），走原生计划
+    try (CrossDb db = new CrossDb()) {
+      int n = 0;
+      try (ResultSet rs = db.register("userdb", Fixtures.USERS)
+          .register("orderdb", Fixtures.ORDERS).query(
+          "SELECT u.name FROM userdb.users u CROSS JOIN orderdb.orders o")) {
+        while (rs.next()) {
+          n++;
+        }
+      }
+      assertEquals(12, n, "3 用户 × 4 订单 = 12 行");
+    }
+  }
+
+  @Test void readOnlyRejectsDmlButAllowsSelectAndCte() throws Exception {
+    try (CrossDb db = new CrossDb()) {
+      db.register("userdb", Fixtures.USERS).register("orderdb", Fixtures.ORDERS);
+      SQLException e = assertThrows(SQLException.class,
+          () -> db.query("DELETE FROM userdb.users WHERE id = 1"));
+      assertTrue(e.getMessage().contains("只读"), e.getMessage());
+      assertThrows(SQLException.class,
+          () -> db.query("INSERT INTO userdb.users VALUES (9, 'eve')"));
+      assertThrows(SQLException.class, () -> db.explain("UPDATE userdb.users SET id = 1"));
+      // SELECT 与 WITH CTE 形态放行
+      try (ResultSet rs = db.query("SELECT COUNT(*) AS c FROM userdb.users")) {
+        assertTrue(rs.next());
+        assertEquals(3, rs.getInt(1));
+      }
+      try (ResultSet rs = db.query(
+          "WITH big AS (SELECT id FROM userdb.users WHERE id >= 2) "
+          + "SELECT COUNT(*) AS c FROM big")) {
+        assertTrue(rs.next());
+        assertEquals(2, rs.getInt(1));
+      }
+    }
+  }
+
+  @Test void shardTopNPushesOrderAndLimitIntoEachUnionBranch() throws Exception {
+    // UNION ALL 跨库合并 + ORDER BY + LIMIT：ShardTopNRule 把排序+裁剪下推到
+    // 每个分支源库（每库只回 offset+fetch 行），本地归并保持语义
+    List<String> sqls = Collections.synchronizedList(new ArrayList<>());
+    DataSource users = Recording.dataSource(Fixtures.USERS, sqls, new ArrayList<>());
+    DataSource orders = Recording.dataSource(Fixtures.ORDERS, sqls, new ArrayList<>());
+    try (CrossDb db = new CrossDb()) {
+      List<Integer> ids = new ArrayList<>();
+      try (ResultSet rs = db.register("userdb", users).register("orderdb", orders).query(
+          "SELECT id FROM (SELECT id FROM userdb.users UNION ALL "
+          + "SELECT id FROM orderdb.orders) t ORDER BY id DESC LIMIT 3")) {
+        while (rs.next()) {
+          ids.add(rs.getInt(1));
+        }
+      }
+      assertEquals(List.of(103, 102, 101), ids);
+      long pushed = sqls.stream()
+          .filter(s -> s.contains("ORDER BY") && (s.contains("LIMIT") || s.contains("FETCH")))
+          .count();
+      assertEquals(2, pushed, "两个分支源库 SQL 都应下推 ORDER BY + LIMIT/FETCH: " + sqls);
+    }
+  }
+
+  @Test void shardTopNWithOffsetReturnsCorrectWindow() throws Exception {
+    // 带 OFFSET 的分片 Top-N：分支取前 offset+fetch 行，本地按原 offset/fetch 裁剪
+    try (CrossDb db = new CrossDb()) {
+      List<Integer> ids = new ArrayList<>();
+      try (ResultSet rs = db.register("userdb", Fixtures.USERS)
+          .register("orderdb", Fixtures.ORDERS).query(
+          "SELECT id FROM (SELECT id FROM userdb.users UNION ALL "
+          + "SELECT id FROM orderdb.orders) t ORDER BY id DESC LIMIT 2 OFFSET 2")) {
+        while (rs.next()) {
+          ids.add(rs.getInt(1));
+        }
+      }
+      // 全体 id 降序: 103,102,101,100,3,2,1 → 跳过 2 行取 2 行
+      assertEquals(List.of(101, 100), ids);
+    }
+  }
+
+  @Test void crossDbUnionAllWithoutTopNStillWorks() throws Exception {
+    // 不带 ORDER BY/LIMIT 的 UNION ALL：各分支整条 SQL 下发（原生即覆盖），
+    // 最终结果仍受行数熔断封顶（users 3 行 + orders 4 行 > 阈值 6）
+    try (CrossDb db = new CrossDb(1000, 6, 500, 2)) {
+      int n = 0;
+      try {
+        try (ResultSet rs = db.register("userdb", Fixtures.USERS)
+            .register("orderdb", Fixtures.ORDERS).query(
+            "SELECT id FROM userdb.users UNION ALL SELECT id FROM orderdb.orders")) {
+          while (rs.next()) {
+            n++;
+          }
+        }
+        fail("合并输出 7 行超过阈值 6，应触发熔断");
+      } catch (Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null) {
+          root = root.getCause();
+        }
+        assertTrue(String.valueOf(root.getMessage()).contains("熔断"),
+            "根因应是熔断信息: " + root);
+      }
+      assertEquals(6, n, "前 6 行流式通过，第 7 行触发熔断");
     }
   }
 

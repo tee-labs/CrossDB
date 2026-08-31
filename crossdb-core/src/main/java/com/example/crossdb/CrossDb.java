@@ -11,6 +11,7 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.parser.SqlParser;
 import org.apache.calcite.tools.FrameworkConfig;
@@ -159,6 +160,7 @@ public class CrossDb implements AutoCloseable {
     RelNode best;
     try {
       SqlNode parsed = planner.parse(sql);
+      checkReadOnly(parsed);
       SqlNode validated = planner.validate(parsed);
       RelRoot root = planner.rel(validated);
       best = planner.transform(0,
@@ -224,13 +226,55 @@ public class CrossDb implements AutoCloseable {
     }
   }
 
+  /** 只读硬化：仅放行查询形态（SELECT、UNION/INTERSECT/EXCEPT 集合操作、
+   * ORDER BY/LIMIT 与 WITH CTE 包裹），DML/DDL/SET 等一律拒绝——引擎
+   * Read-only by design，写入必须直接走各源库。 */
+  private static void checkReadOnly(SqlNode parsed) throws SQLException {
+    if (!isQuery(parsed)) {
+      throw new SQLException("crossdb 只读引擎：拒绝非查询语句（" + parsed.getKind()
+          + "），仅支持 SELECT。写入/DDL 请直接操作各源库。");
+    }
+  }
+
+  private static boolean isQuery(SqlNode n) {
+    while (true) {
+      if (n instanceof org.apache.calcite.sql.SqlOrderBy ob) {
+        n = ob.query;
+        continue;
+      }
+      if (n instanceof org.apache.calcite.sql.SqlWith with) {
+        n = with.body;
+        continue;
+      }
+      break;
+    }
+    if (n instanceof SqlSelect) {
+      return true;
+    }
+    if (n instanceof org.apache.calcite.sql.SqlCall call) {
+      return switch (call.getKind()) {
+        case UNION, INTERSECT, EXCEPT -> call.getOperandList().stream()
+            .filter(java.util.Objects::nonNull).allMatch(CrossDb::isQuery);
+        default -> false;
+      };
+    }
+    return false;
+  }
+
   private Program queryProgram() {
     BindJoinRule rule = new BindJoinRule(sources, bindBatchSize, bindParallelism);
     TopNBindJoinRule topN = new TopNBindJoinRule(sources, bindBatchSize, bindParallelism);
+    AntiBindJoinRule anti = new AntiBindJoinRule(sources, bindBatchSize, bindParallelism);
+    AntiBindJoinFilterRule antiFilter =
+        new AntiBindJoinFilterRule(sources, bindBatchSize, bindParallelism);
+    ShardTopNRule shardTopN = new ShardTopNRule();
     Program standard = Programs.standard();
     return (planner, rel, requiredTraits, materializations, lattices) -> {
       planner.addRule(rule);
       planner.addRule(topN);
+      planner.addRule(anti);
+      planner.addRule(antiFilter);
+      planner.addRule(shardTopN);
       return standard.run(planner, rel, requiredTraits, materializations, lattices);
     };
   }
