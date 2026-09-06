@@ -1263,4 +1263,447 @@ class CrossDbScenariosTest {
       }
     }
   }
+
+  // ---------- 高级窗口（参考 Trino window / Calcite WindowTest 用例） ----------
+
+  @Nested
+  @DisplayName("高级窗口函数场景")
+  class AdvancedWindows {
+
+    @Test void lagAndLeadOverOrder() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100,NULL,101", "101,100,102", "102,101,103", "103,102,NULL"),
+            rows(db, "SELECT id, LAG(id) OVER (ORDER BY id), LEAD(id) OVER (ORDER BY id) "
+                + "FROM orderdb.orders ORDER BY id"));
+      }
+    }
+
+    @Test void partitionByWithOrderByRowNumber() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,10,1", "alice,5,2", "bob,20,1", "bob,1,2"),
+            rows(db, "SELECT u.name, o.amount, "
+                + "ROW_NUMBER() OVER (PARTITION BY u.name ORDER BY o.amount DESC) "
+                + "FROM userdb.users u JOIN orderdb.orders o ON o.user_id = u.id "
+                + "ORDER BY 1, 3"));
+      }
+    }
+
+    @Test void firstValueOverPartitionByJoin() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,100", "bob,101", "alice,100", "bob,101"),
+            rows(db, "SELECT u.name, FIRST_VALUE(o.id) OVER "
+                + "(PARTITION BY u.name ORDER BY o.id) "
+                + "FROM userdb.users u JOIN orderdb.orders o ON o.user_id = u.id "
+                + "ORDER BY o.id"));
+      }
+    }
+
+    @Test void countOverPartitionOnJoin() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,100,2", "bob,101,2", "alice,102,2", "bob,103,2"),
+            rows(db, "SELECT u.name, o.id, COUNT(*) OVER (PARTITION BY u.name) "
+                + "FROM userdb.users u JOIN orderdb.orders o ON o.user_id = u.id "
+                + "ORDER BY o.id"));
+      }
+    }
+
+    @Test void globalSumOverWithoutPartition() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100,36", "101,36", "102,36", "103,36"),
+            rows(db, "SELECT id, SUM(amount) OVER () FROM orderdb.orders ORDER BY id"));
+      }
+    }
+
+    @Test void topNPerGroupViaRowNumberDerivedTable() throws Exception {
+      // 窗口叠在跨库 Join 之上：派生表内 ROW_NUMBER 过滤每组 Top-1（经典 per-group TopN 形态）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,100", "bob,101"),
+            rows(db, "SELECT name, id FROM "
+                + "(SELECT u.name, o.id, ROW_NUMBER() OVER "
+                + "(PARTITION BY u.name ORDER BY o.amount DESC) AS rn "
+                + "FROM userdb.users u JOIN orderdb.orders o ON o.user_id = u.id) t "
+                + "WHERE rn = 1 ORDER BY name"));
+      }
+    }
+  }
+
+  // ---------- 分组扩展（参考 Calcite grouping 用例 / Trino GROUPING SETS） ----------
+
+  @Nested
+  @DisplayName("GROUPING SETS / ROLLUP / CUBE 场景")
+  class GroupingExtensions {
+
+    @Test void rollupAddsGrandTotalRow() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,2", "bob,2", "NULL,4"),
+            rows(db, "SELECT u.name, COUNT(*) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "GROUP BY ROLLUP(u.name) ORDER BY u.name NULLS LAST"));
+      }
+    }
+
+    @Test void groupingSetsTwoLevels() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("100,1,1", "100,2,1", "100,3,1", "100,NULL,3", "200,1,1", "200,NULL,1"),
+            rows(db, "SELECT tenant_id, user_id, COUNT(*) FROM credsdb.creds "
+                + "GROUP BY GROUPING SETS ((tenant_id, user_id), (tenant_id)) "
+                + "ORDER BY tenant_id, user_id NULLS LAST"));
+      }
+    }
+
+    @Test void cubeSingleColumn() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("100,3", "200,1", "NULL,4"),
+            rows(db, "SELECT tenant_id, COUNT(*) FROM credsdb.creds "
+                + "GROUP BY CUBE(tenant_id) ORDER BY tenant_id NULLS LAST"));
+      }
+    }
+  }
+
+  // ---------- TPC-H 补充形态（Q5/Q17/Q18 条件聚合与过滤聚合） ----------
+
+  @Nested
+  @DisplayName("TPC-H 补充形态场景")
+  class TpchMoreShapes {
+
+    /** Q5 形态：三表 JOIN + 维度过滤 + 按维度分组求和。 */
+    @Test void q5ThreeWayJoinDimensionFilterSum() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("100,36"),
+            rows(db, "SELECT c.tenant_id, SUM(o.amount) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "JOIN credsdb.creds c ON c.user_id = u.id AND c.tenant_id = 100 "
+                + "GROUP BY c.tenant_id"));
+      }
+    }
+
+    /** Q17 形态：与聚合子查询（带系数）比较过滤。 */
+    @Test void q17FilterAgainstScaledAverageSubquery() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,100", "bob,101", "alice,102"),
+            rows(db, "SELECT u.name, o.id FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "WHERE o.amount > 0.5 * (SELECT AVG(amount) FROM orderdb.orders) "
+                + "ORDER BY o.id"));
+      }
+    }
+
+    /** Q18 形态：IN 子查询 + GROUP BY + HAVING 聚合过滤组合。 */
+    @Test void q18InGroupByHaving() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("alice,15", "bob,21"),
+            rows(db, "SELECT u.name, SUM(o.amount) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "WHERE u.id IN (SELECT user_id FROM credsdb.creds WHERE tenant_id = 100) "
+                + "GROUP BY u.name HAVING SUM(o.amount) > 5 ORDER BY u.name"));
+      }
+    }
+
+    /** Q8 形态：条件聚合（CASE 计数占比形态）。 */
+    @Test void q8ConditionalAggregateShare() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2,4"),
+            rows(db, "SELECT SUM(CASE WHEN o.amount >= 10 THEN 1 ELSE 0 END), COUNT(*) "
+                + "FROM userdb.users u JOIN orderdb.orders o ON o.user_id = u.id"));
+      }
+    }
+  }
+
+  // ---------- 集合操作链与 NULL 成员（参考 PostgreSQL regress 集合用例） ----------
+
+  @Nested
+  @DisplayName("集合操作链场景")
+  class SetOpChains {
+
+    @Test void unionExceptChainLeftAssociative() throws Exception {
+      // 左结合：(users ∪ orders) EXCEPT users = {100..103}
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100", "101", "102", "103"),
+            rows(db, "SELECT id FROM userdb.users UNION "
+                + "SELECT id FROM orderdb.orders "
+                + "EXCEPT SELECT id FROM userdb.users ORDER BY id"));
+      }
+    }
+
+    @Test void intersectHandlesNullMembers() throws Exception {
+      // INTERSECT DISTINCT 下 NULL 视为相等：pings{1,9,NULL} ∩ users{1,2,3} = {1}
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1"),
+            rows(db, "SELECT user_id FROM pingdb.pings INTERSECT "
+                + "SELECT id FROM userdb.users ORDER BY user_id"));
+      }
+    }
+
+    @Test void exceptKeepsNullAndUnmatched() throws Exception {
+      // pings EXCEPT users = {9, NULL}（NULL 归组相等保留）
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("NULL", "9"),
+            rows(db, "SELECT user_id FROM pingdb.pings EXCEPT "
+                + "SELECT id FROM userdb.users ORDER BY user_id NULLS FIRST"));
+      }
+    }
+
+    @Test void threeWayUnionDistinct() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("1", "2", "3", "100", "101", "102", "103"),
+            rows(db, "SELECT id FROM userdb.users UNION "
+                + "SELECT id FROM orderdb.orders UNION "
+                + "SELECT user_id FROM credsdb.creds ORDER BY id"));
+      }
+    }
+
+    @Test void unionAllInsideCteJoinedBack() throws Exception {
+      // 分片合并结果回流 JOIN 同库小表：分片 + 关联组合形态
+      try (CrossDb db = core()) {
+        assertEquals("2", scalar(db, "WITH allids AS "
+            + "(SELECT id FROM userdb.users UNION ALL SELECT id FROM orderdb.orders) "
+            + "SELECT COUNT(*) FROM allids a JOIN userdb.small s ON s.id = a.id"));
+      }
+    }
+
+    @Test void intersectDedupsDuplicatePairs() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1", "2"),
+            rows(db, "SELECT user_id FROM orderdb.orders INTERSECT "
+                + "SELECT id FROM userdb.small ORDER BY user_id"));
+      }
+    }
+  }
+
+  // ---------- VALUES / APPLY（参考 Calcite VALUES 与 SQL Server APPLY 形态） ----------
+
+  @Nested
+  @DisplayName("VALUES 与 LATERAL APPLY 场景")
+  class ValuesAndApply {
+
+    @Test void valuesTableJoinedCrossDb() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice", "carol"),
+            rows(db, "SELECT u.name FROM userdb.users u "
+                + "JOIN (VALUES (1), (3)) AS t(x) ON u.id = t.x ORDER BY u.name"));
+      }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：解析器 SQL conformance 未放行 APPLY（CROSS APPLY / OUTER APPLY），"
+        + "解析期即拒绝；需调整 SqlConformance 或改写为 LATERAL 后启用")
+    void crossApplyCorrelatedMaxAmount() throws Exception {
+      // CROSS APPLY = 相关派生表内连接语义：无订单的 carol 不出现
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,10", "bob,20"),
+            rows(db, "SELECT u.name, d.max_amount FROM userdb.users u "
+                + "CROSS APPLY (SELECT MAX(o.amount) AS max_amount FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d ORDER BY u.name"));
+      }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：解析器 SQL conformance 未放行 APPLY（CROSS APPLY / OUTER APPLY），"
+        + "解析期即拒绝；需调整 SqlConformance 或改写为 LATERAL 后启用")
+    void outerApplyKeepsUnmatchedOuterRows() throws Exception {
+      // OUTER APPLY = LEFT 相关派生表：carol 保留且补 NULL
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,10", "bob,20", "carol,NULL"),
+            rows(db, "SELECT u.name, d.max_amount FROM userdb.users u "
+                + "OUTER APPLY (SELECT MAX(o.amount) AS max_amount FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d ORDER BY u.name"));
+      }
+    }
+  }
+
+  // ---------- 空集 / 重复 key / 标量子查询边界（参考 Vitess 批处理边界用例） ----------
+
+  @Nested
+  @DisplayName("空集与标量子查询边界场景")
+  class EmptyAndScalarEdges {
+
+    @Test void emptyDriverSideJoinYieldsEmpty() throws Exception {
+      // 驱动侧过滤后零行：Bind Join 以空 key 集合执行，不发 IN 查询、返回空
+      try (CrossDb db = core()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM userdb.users u "
+            + "JOIN orderdb.orders o ON o.user_id = u.id WHERE u.id > 99"));
+      }
+    }
+
+    @Test void emptyInnerDerivedTableJoin() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM userdb.users u "
+            + "JOIN (SELECT user_id FROM orderdb.orders WHERE amount > 999) d "
+            + "ON d.user_id = u.id"));
+      }
+    }
+
+    @Test void inEmptySubqueryMatchesNothing() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM userdb.users WHERE id IN "
+            + "(SELECT id FROM userdb.users WHERE id > 99)"));
+      }
+    }
+
+    @Test void notInEmptySubqueryMatchesAll() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals("3", scalar(db, "SELECT COUNT(*) FROM userdb.users WHERE id NOT IN "
+            + "(SELECT id FROM userdb.users WHERE id > 99)"));
+      }
+    }
+
+    @Test void scalarSubqueryZeroRowsYieldsNullComparison() throws Exception {
+      // 零行标量子查询 = NULL → 等值比较恒 UNKNOWN → 空集
+      try (CrossDb db = core()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM userdb.users WHERE id = "
+            + "(SELECT MAX(id) FROM userdb.users WHERE id > 99)"));
+      }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：多行标量子查询的拒绝行为正确（未静默取行），"
+        + "但以 IllegalStateException（非受检）从 query() 泄出，应统一包装为 SQLException")
+    void scalarSubqueryMultipleRowsRejected() throws Exception {
+      // 多行标量子查询应为错误（标准 SQL 行为）
+      try (CrossDb db = core()) {
+        org.junit.jupiter.api.Assertions.assertThrows(SQLException.class,
+            () -> db.query("SELECT id FROM userdb.users WHERE id = "
+                + "(SELECT user_id FROM orderdb.orders)"));
+      }
+    }
+
+    @Test void semiWithDuplicateDriverKeys() throws Exception {
+      // 驱动侧存在重复 key（orders.user_id 各 2 次）：SEMI 匹配计数不受重复影响
+      try (CrossDb db = core()) {
+        assertEquals("4", scalar(db, "SELECT COUNT(*) FROM orderdb.orders o WHERE EXISTS "
+            + "(SELECT 1 FROM userdb.users u WHERE u.id = o.user_id)"));
+      }
+    }
+
+    @Test void antiWithDuplicateDriverKeys() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM orderdb.orders o WHERE NOT EXISTS "
+            + "(SELECT 1 FROM userdb.users u WHERE u.id = o.user_id)"));
+      }
+    }
+  }
+
+  // ---------- 表达式补充（参考 Calcite SqlOperatorsTest / PostgreSQL 函数用例） ----------
+
+  @Nested
+  @DisplayName("表达式补充场景")
+  class MoreExpressions {
+
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：SIMILAR TO 被 Calcite JDBC convention 原样下推源库执行，"
+        + "H2 等源库不支持该语法直接报错；应本地改写为 LIKE/REGEXP 语义后再启用")
+    void similarToPredicate() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice"),
+            rows(db, "SELECT name FROM userdb.users WHERE name SIMILAR TO 'a%'"));
+      }
+    }
+
+    @Test void nullConcatPropagatesNull() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("NULL",
+            scalar(db, "SELECT note || 'x' FROM pingdb.pings WHERE id = 3"));
+      }
+    }
+
+    @Test void roundCeilFloorSign() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("3,2,1,-1"),
+            rows(db, "SELECT ROUND(2.5), CEIL(1.2), FLOOR(1.8), SIGN(-3) "
+                + "FROM userdb.small LIMIT 1"));
+      }
+    }
+
+    @Test void powerSqrtAbs() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("8.0,4.0,5"),
+            rows(db, "SELECT POWER(2, 3), SQRT(16.0), ABS(-5) FROM userdb.small LIMIT 1"));
+      }
+    }
+
+    @Test void intervalAdditionFilter() throws Exception {
+      // ts + INTERVAL '1' DAY：id1 恰好到达边界、id3 超过、id2 为 NULL → 2 行
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("2", scalar(db, "SELECT COUNT(*) FROM pingdb.pings "
+            + "WHERE ts + INTERVAL '1' DAY >= TIMESTAMP '2026-01-03 03:04:05'"));
+      }
+    }
+
+    @Test void timestampDiffMonths() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("1", scalar(db, "SELECT TIMESTAMPDIFF(MONTH, "
+            + "(SELECT ts FROM pingdb.pings WHERE id = 1), "
+            + "(SELECT ts FROM pingdb.pings WHERE id = 3))"));
+      }
+    }
+
+    @Test void coalesceMultiArgFallbackChain() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("a", "b", "none"),
+            rows(db, "SELECT COALESCE(note, CAST(user_id AS VARCHAR), 'none') "
+                + "FROM pingdb.pings ORDER BY id"));
+      }
+    }
+  }
+
+  // ---------- 分组补充边界（参考 PostgreSQL regress 分组用例） ----------
+
+  @Nested
+  @DisplayName("分组补充边界场景")
+  class GroupEdges {
+
+    @Test void nullGroupKeyFormsOwnGroup() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1,1", "9,1", "NULL,1"),
+            rows(db, "SELECT user_id, COUNT(*) FROM pingdb.pings "
+                + "GROUP BY user_id ORDER BY user_id NULLS LAST"));
+      }
+    }
+
+    @Test void havingReferencesGroupKey() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob,2"),
+            rows(db, "SELECT u.name, COUNT(*) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "GROUP BY u.name HAVING u.name <> 'alice' ORDER BY u.name"));
+      }
+    }
+
+    @Test void orderByAggregateOrdinalDesc() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob,21", "alice,15"),
+            rows(db, "SELECT u.name, SUM(o.amount) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "GROUP BY u.name ORDER BY 2 DESC"));
+      }
+    }
+
+    @Test void groupByUnselectedColumn() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1", "1", "1"),
+            rows(db, "SELECT COUNT(*) FROM pingdb.pings "
+                + "GROUP BY user_id ORDER BY user_id NULLS LAST"));
+      }
+    }
+
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：多列 COUNT(DISTINCT a, b) 被原样下推源库，"
+        + "H2/PostgreSQL 等主流后端不支持该语法（MySQL 支持）直接报错；应在本地实现多列去重聚合")
+    void countDistinctMultipleColumns() throws Exception {
+      // 多列 COUNT DISTINCT：(100,1),(100,2),(200,1),(100,3) 共 4 组
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals("4", scalar(db,
+            "SELECT COUNT(DISTINCT tenant_id, user_id) FROM credsdb.creds"));
+      }
+    }
+
+    @Test void maxOfStringAfterJoin() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("alice,a2", "bob,b1", "carol,c1"),
+            rows(db, "SELECT u.name, MAX(c.login) FROM userdb.users u "
+                + "JOIN credsdb.creds c ON c.user_id = u.id "
+                + "GROUP BY u.name ORDER BY u.name"));
+      }
+    }
+  }
 }
