@@ -293,8 +293,17 @@ public final class BindJoinExec {
             }
           }
 
-          /** FULL JOIN 收尾：内表中 key 不属于任何外表 key 的行（NOT IN 分块反连接）。 */
+          /** FULL JOIN 收尾：内表中 key 不属于任何外表 key 的行（NOT IN 分块反连接）；
+           * safeMode 下外表无可用 key（零行或全 NULL key）意味着反连接将无 WHERE
+           * 全表拉取内表，按「零容忍全表拉取」直接拒绝。 */
           private Iterator<Object[]> fetchRemainder() {
+            if (stats != null && stats.safeMode && queued.isEmpty()) {
+              shutdown();
+              // 迭代期只能抛未受检异常，原生异常挂 cause 上（与行数熔断同风格）
+              throw new RuntimeException(new CrossDbUnsafeQueryException("crossdb safeMode:"
+                  + " FULL JOIN 反连接在外表无可用 key 时将对内表全表拉取，已拒绝执行。"
+                  + "请在外表侧补充 WHERE 条件，或关闭 safeMode。"));
+            }
             try {
               return fetchRemainderRows(dataSource, sqlPrefix, keyCols, tupleIn,
                   new ArrayList<>(queued), width, batchSize).iterator();
@@ -391,8 +400,11 @@ public final class BindJoinExec {
     return 0;
   }
 
-  /** FULL JOIN 反连接：{@code WHERE NOT (key IN 分块1) AND NOT (key IN 分块2)...}；
-   * 外表无非空 key 时内表全量即为未匹配。行数受 rowLimit 熔断封顶（语句级 maxRows）。 */
+  /** FULL JOIN 反连接：{@code WHERE (NOT (key IN 分块1) OR key IS NULL) AND ...}；
+   * 每块补 {@code key IS NULL}（复合键逐列）：三值逻辑下 NULL 的 {@code IN} 恒 UNKNOWN、
+   * {@code NOT UNKNOWN} 仍 UNKNOWN，不补则内表 NULL key 的未匹配行被静默丢行（原生
+   * FULL JOIN 语义要求左侧补 NULL 输出）。外表无非空 key 时内表全量即为未匹配（无
+   * WHERE；safeMode 下由调用方拒绝）。行数受 rowLimit 熔断封顶（语句级 maxRows）。 */
   private static List<Object[]> fetchRemainderRows(DataSource dataSource, String sqlPrefix,
       String[] keyCols, boolean tupleIn, List<List<Object>> keys, int width, int chunk)
       throws Exception {
@@ -401,7 +413,12 @@ public final class BindJoinExec {
       List<String> nots = new ArrayList<>();
       for (int i = 0; i < keys.size(); i += Math.max(1, chunk)) {
         List<List<Object>> part = keys.subList(i, Math.min(keys.size(), i + Math.max(1, chunk)));
-        nots.add("NOT (" + buildWhere(keyCols, part.size(), tupleIn) + ")");
+        List<String> cond = new ArrayList<>();
+        cond.add("NOT (" + buildWhere(keyCols, part.size(), tupleIn) + ")");
+        for (String col : keyCols) {
+          cond.add(col + " IS NULL");
+        }
+        nots.add("(" + String.join(" OR ", cond) + ")");
       }
       sql.append(" WHERE ").append(String.join(" AND ", nots));
     }

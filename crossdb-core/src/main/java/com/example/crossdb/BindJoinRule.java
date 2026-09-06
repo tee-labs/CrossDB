@@ -37,7 +37,8 @@ import java.util.Set;
  * 多列 key 在 H2/MySQL/PostgreSQL/Oracle 用 tuple-IN，其余方言降级为 OR 组。
  */
 class BindJoinRule extends RelOptRule {
-  private static final Set<SqlDialect.DatabaseProduct> TUPLE_IN_DIALECTS = Set.of(
+  /** 多列 key 是否可用 tuple-IN 的方言判定表（无真库也能单测；不在表内的方言降级 OR 组）。 */
+  static final Set<SqlDialect.DatabaseProduct> TUPLE_IN_DIALECTS = Set.of(
       SqlDialect.DatabaseProduct.H2,
       SqlDialect.DatabaseProduct.MYSQL,
       SqlDialect.DatabaseProduct.POSTGRESQL,

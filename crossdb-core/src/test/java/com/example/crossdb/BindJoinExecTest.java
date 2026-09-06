@@ -14,6 +14,7 @@ import java.util.TreeMap;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -261,6 +262,79 @@ class BindJoinExecTest {
     assertEquals(2, uid2, "应补出内表 user_id=2 的两行");
     assertEquals(2, sqls.size(), "1 条 IN + 1 条 NOT IN 反连接: " + sqls);
     assertTrue(sqls.get(1).contains("NOT ("), sqls.get(1));
+  }
+
+  @Test void fullRemainderIncludesInnerNullKeys() {
+    List<String> sqls = Collections.synchronizedList(new ArrayList<>());
+    // FULL：内表含 user_id=9 与 user_id=NULL 的未匹配行。三值逻辑下 NULL 的 NOT IN
+    // 恒 UNKNOWN，反连接 WHERE 必须补 OR key IS NULL，否则 NULL key 行被静默丢行
+    String prefix =
+        "SELECT * FROM (SELECT \"ID\", \"USER_ID\", \"NOTE\" FROM \"PINGS\") AS \"T\"";
+    Enumerable<Object[]> out = BindJoinExec.join(
+        left(new Object[]{1, "alice"}),
+        Recording.dataSource(Fixtures.PINGS, sqls, new ArrayList<>()), prefix,
+        new String[]{"\"T\".\"USER_ID\""}, new int[]{0}, new int[]{1}, 3, 500, 1,
+        true, false, false, false, true, 2);
+    List<Object[]> rows = out.toList();
+    assertEquals(3, rows.size(), "1 匹配行 + 2 反连接行（含 NULL key）: " + rows);
+    assertEquals(1L, rows.stream().filter(r -> Integer.valueOf(9).equals(r[3])).count(),
+        "user_id=9 的未匹配行应补出: " + rows);
+    // NULL key 反连接行 [null,null,3,null,null]
+    assertEquals(1L, rows.stream().filter(r -> Integer.valueOf(3).equals(r[2]) && r[3] == null)
+        .count(), "内表 NULL key 的未匹配行应补出且左侧全 NULL: " + rows);
+    assertTrue(sqls.get(1).contains("IS NULL"), "反连接应补 key IS NULL: " + sqls.get(1));
+  }
+
+  @Test void safeModeRejectsDegenerateFullAntiJoinAtRuntime() {
+    Stats stats = new Stats();
+    stats.safeMode = true;
+    Stats.ACTIVE = stats;
+    try {
+      // 外表零行 → queued 为空 → 反连接将无 WHERE 全表拉取内表，safeMode 应拒绝
+      RuntimeException e = assertThrows(RuntimeException.class, () -> BindJoinExec.join(
+          left(), recordingDs(new ArrayList<>()), PREFIX, KEY, new int[]{0}, new int[]{1},
+          3, 500, 1, true, false, false, false, true, 2).toList());
+      assertTrue(e.getCause() instanceof CrossDbUnsafeQueryException,
+          "根因应是 safeMode 拦截: " + e);
+      assertTrue(e.getCause().getMessage().contains("safeMode"), e.getCause().getMessage());
+    } finally {
+      Stats.ACTIVE = null;
+    }
+  }
+
+  @Test void safeModeAllowsFullAntiJoinWithUsableKeys() {
+    Stats stats = new Stats();
+    stats.safeMode = true;
+    Stats.ACTIVE = stats;
+    try {
+      // 外表有可用 key → 反连接带 NOT IN 过滤，safeMode 不应拦截
+      Enumerable<Object[]> out = BindJoinExec.join(
+          left(new Object[]{1, "alice"}, new Object[]{3, "carol"}),
+          recordingDs(new ArrayList<>()), PREFIX, KEY, new int[]{0}, new int[]{1}, 3, 500, 1,
+          true, false, false, false, true, 2);
+      assertEquals(5, out.toList().size(),
+          "user1×2 匹配 + user3 补 NULL 1 行 + user2 反连接 2 行 = 5");
+    } finally {
+      Stats.ACTIVE = null;
+    }
+  }
+
+  @Test void tupleInDialectDecisionTable() {
+    // tuple-IN 判定表：H2/MySQL/PostgreSQL/Oracle 用 (a,b) IN ((?,?))，其余方言降级 OR 组
+    for (var product : java.util.Set.of(
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.H2,
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.MYSQL,
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.POSTGRESQL,
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.ORACLE)) {
+      assertTrue(BindJoinRule.TUPLE_IN_DIALECTS.contains(product), product + " 应用 tuple-IN");
+    }
+    for (var product : java.util.Set.of(
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.DERBY,
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.MSSQL,
+        org.apache.calcite.sql.SqlDialect.DatabaseProduct.CALCITE)) {
+      assertFalse(BindJoinRule.TUPLE_IN_DIALECTS.contains(product),
+          product + " 应降级 OR 组");
+    }
   }
 
   @Test void sortedLeftKeepsMatchesAcrossWindowsWithEviction() {

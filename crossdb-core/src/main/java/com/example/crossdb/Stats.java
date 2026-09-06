@@ -21,6 +21,9 @@ final class Stats {
   final LongAdder bindRows = new LongAdder();
   /** 在途源库语句（供级联取消），语句关闭时由 Guarded 注销。 */
   final Set<java.sql.Statement> live = ConcurrentHashMap.newKeySet();
+  /** safeMode 标记：Bind Join 的 FULL 反连接在外表无可用 key 时将全表拉取内表，
+   * 由执行器在运行期读取并拒绝（计划期无法判定外表是否为空）。 */
+  volatile boolean safeMode;
 
   static final class Schema {
     final Set<String> sqls = ConcurrentHashMap.newKeySet();

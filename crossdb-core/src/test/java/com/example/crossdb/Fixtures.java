@@ -32,6 +32,16 @@ final class Fixtures {
       CREATE TABLE IF NOT EXISTS events(id INT PRIMARY KEY, user_id INT);
       INSERT INTO events VALUES (1,1),(2,9);
       """);
+  /** 内表 NULL key + 常用类型列夹具：user_id 含 NULL（验证 FULL 反连接不丢 NULL key 行），
+   * note/amount/ts/flag 含 NULL（验证 ResultSet 取值 API 与 wasNull）。 */
+  static final JdbcDataSource PINGS = init("pings", """
+      CREATE TABLE IF NOT EXISTS pings(id INT PRIMARY KEY, user_id INT, note VARCHAR(20),
+        amount DECIMAL(10,2), ts TIMESTAMP, flag BOOLEAN);
+      INSERT INTO pings VALUES
+        (1, 1, 'a', 1.25, TIMESTAMP '2026-01-02 03:04:05', TRUE),
+        (2, 9, 'b', NULL, NULL, NULL),
+        (3, NULL, NULL, 3.5, TIMESTAMP '2026-02-03 04:05:06', FALSE);
+      """);
 
   private Fixtures() {}
 
