@@ -11,9 +11,21 @@ import org.apache.calcite.rel.RelNode;
 import org.apache.calcite.rel.RelRoot;
 import org.apache.calcite.rel.core.Join;
 import org.apache.calcite.rel.core.Sort;
+import org.apache.calcite.sql.SqlIdentifier;
+import org.apache.calcite.sql.SqlKind;
 import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlNode;
+import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParser;
+import org.apache.calcite.sql.parser.SqlParserPos;
+import org.apache.calcite.sql.type.OperandTypes;
+import org.apache.calcite.sql.type.ReturnTypes;
+import org.apache.calcite.sql.type.SqlTypeFamily;
+import org.apache.calcite.sql.type.SqlTypeName;
+import org.apache.calcite.sql.util.SqlOperatorTables;
+import org.apache.calcite.sql.validate.SqlConformanceEnum;
+import org.apache.calcite.sql.validate.SqlUserDefinedFunction;
+import org.apache.calcite.schema.impl.ScalarFunctionImpl;
 import org.apache.calcite.tools.FrameworkConfig;
 import org.apache.calcite.tools.Frameworks;
 import org.apache.calcite.tools.Planner;
@@ -26,6 +38,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
@@ -161,7 +174,14 @@ public class CrossDb implements AutoCloseable {
 
   private RelNode plan(String sql) throws SQLException {
     FrameworkConfig config = Frameworks.newConfigBuilder()
-        .parserConfig(SqlParser.config().withLex(Lex.MYSQL))
+        // 操作符表：标准表 + 本地 UDF（SIMILAR TO 改写目标，供校验按名解析）
+        .operatorTable(SqlOperatorTables.chain(
+            org.apache.calcite.sql.fun.SqlStdOperatorTable.instance(),
+            SqlOperatorTables.of(SIMILAR_FN_2, SIMILAR_FN_3)))
+        .parserConfig(SqlParser.config().withLex(Lex.MYSQL)
+            // LENIENT：放行 CROSS/OUTER APPLY（SQL Server 风格相关派生表）；
+            // 对既有语法仅为放宽（!= / LIMIT a,b 等在 LENIENT 下同样可用）
+            .withConformance(SqlConformanceEnum.LENIENT))
         .defaultSchema(connection.getRootSchema())
         .programs(queryProgram())
         .build();
@@ -169,6 +189,7 @@ public class CrossDb implements AutoCloseable {
     RelNode best;
     try {
       SqlNode parsed = planner.parse(sql);
+      parsed = rewriteSimilarTo(parsed);
       checkReadOnly(parsed);
       SqlNode validated = planner.validate(parsed);
       RelRoot root = planner.rel(validated);
@@ -212,6 +233,57 @@ public class CrossDb implements AutoCloseable {
     return best;
   }
 
+  /** SIMILAR TO 本地求值 UDF（2 参：默认转义符；3 参：ESCAPE 子句）。Calcite 的
+   * Enumerable 约定不实现 SIMILAR_TO，且会把它原样下推源库（H2/PostgreSQL 等不支持
+   * 该语法）；注册成本地 UDF 后：(1) JDBC 推导规则检测到用户自定义函数会放弃下推，
+   * 条件留在本地 Enumerable 执行；(2) 运行时用 Calcite 的 SIMILAR 模式→正则翻译求值。 */
+  private static final SqlUserDefinedFunction SIMILAR_FN_2 =
+      similarFn("CROSSDB_SIMILAR", 2);
+  private static final SqlUserDefinedFunction SIMILAR_FN_3 =
+      similarFn("CROSSDB_SIMILAR", 3);
+
+  private static SqlUserDefinedFunction similarFn(String name, int args) {
+    Class<?>[] params = new Class<?>[args];
+    java.util.Arrays.fill(params, String.class);
+    try {
+      java.lang.reflect.Method method =
+          CrossDbFunctions.class.getMethod("similar", params);
+      return new SqlUserDefinedFunction(new SqlIdentifier(name, SqlParserPos.ZERO),
+          SqlKind.OTHER_FUNCTION, ReturnTypes.BOOLEAN_NULLABLE, null,
+          OperandTypes.operandMetadata(Collections.nCopies(args, SqlTypeFamily.STRING),
+              typeFactory -> Collections.nCopies(args,
+                  typeFactory.createSqlType(SqlTypeName.VARCHAR)),
+              i -> "VALUE", i -> false),
+          ScalarFunctionImpl.create(method));
+    } catch (NoSuchMethodException e) {
+      throw new IllegalStateException(e);
+    }
+  }
+
+  /** 解析树改写：SIMILAR TO / NOT SIMILAR TO → CROSSDB_SIMILAR UDF 调用
+   * （保留 ESCAPE 子句形态；NOT 形态外包一层 NOT）。 */
+  private static SqlNode rewriteSimilarTo(SqlNode node) {
+    return node.accept(new org.apache.calcite.sql.util.SqlShuttle() {
+      @Override public SqlNode visit(org.apache.calcite.sql.SqlCall call) {
+        if (call.getOperator() == SqlStdOperatorTable.SIMILAR_TO
+            || call.getOperator() == SqlStdOperatorTable.NOT_SIMILAR_TO) {
+          boolean negative = call.getOperator() == SqlStdOperatorTable.NOT_SIMILAR_TO;
+          List<SqlNode> operands = call.getOperandList().stream()
+              .map(op -> op == null ? null : op.accept(this))
+              .toList();
+          org.apache.calcite.sql.SqlBasicCall similar =
+              new org.apache.calcite.sql.SqlBasicCall(
+                  operands.size() >= 3 ? SIMILAR_FN_3 : SIMILAR_FN_2,
+                  operands, call.getParserPosition());
+          return negative
+              ? new org.apache.calcite.sql.SqlBasicCall(SqlStdOperatorTable.NOT,
+                  List.of(similar), call.getParserPosition())
+              : similar;
+        }
+        return super.visit(call);
+      }
+    });
+  }
   /** 防呆：源库拉取子树不允许只有 Scan/Filter/Project/无 LIMIT Sort 链（全表拉取）。
    * Bind Join 内表例外——其 SQL 运行时必带 key IN 过滤；Aggregate 视为有归约。 */
   private void checkSafe(RelNode plan) throws CrossDbUnsafeQueryException {
@@ -299,7 +371,18 @@ public class CrossDb implements AutoCloseable {
         new AntiBindJoinFilterRule(sources, bindBatchSize, bindParallelism);
     ShardTopNRule shardTopN = new ShardTopNRule();
     Program standard = Programs.standard();
-    return (planner, rel, requiredTraits, materializations, lattices) -> {
+    // 前置扩展：多列去重聚合（COUNT(DISTINCT a, b)）先改写为「分组去重 + 计数」，
+    // 否则标准程序里的 JdbcAggregateRule 会把它原样下推源库——H2/PostgreSQL 等主流
+    // 后端不支持该语法（MySQL 支持）。扩展产物的多参 COUNT(a,b) 同样非可移植语法，
+    // 再经 MultiArgCountRule 归一为单参 CASE 计数。
+    Program expandDistinct = Programs.of(
+        new org.apache.calcite.plan.hep.HepProgramBuilder()
+            .addRuleInstance(org.apache.calcite.rel.rules.CoreRules
+                .AGGREGATE_EXPAND_DISTINCT_AGGREGATES)
+            .addRuleInstance(new MultiArgCountRule())
+            .build(),
+        true, org.apache.calcite.rel.metadata.DefaultRelMetadataProvider.INSTANCE);
+    Program withCustomRules = (planner, rel, requiredTraits, materializations, lattices) -> {
       planner.addRule(rule);
       planner.addRule(topN);
       planner.addRule(anti);
@@ -307,6 +390,7 @@ public class CrossDb implements AutoCloseable {
       planner.addRule(shardTopN);
       return standard.run(planner, rel, requiredTraits, materializations, lattices);
     };
+    return Programs.sequence(expandDistinct, withCustomRules);
   }
 
   @Override public void close() throws SQLException {

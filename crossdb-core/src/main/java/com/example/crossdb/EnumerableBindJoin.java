@@ -212,7 +212,10 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
             || getJoinType() == JoinRelType.ANTI),
         Expressions.constant(getJoinType() == JoinRelType.ANTI)));
     final PhysType physType =
-        PhysTypeImpl.of(implementor.getTypeFactory(), getRowType(), JavaRowFormat.ARRAY);
+        // optimize=false：单列行型（如 SEMI/ANTI 后仅剩外表单列）会被优化为 SCALAR
+        // 格式，而 BindJoinExec 始终输出 Object[]，下游按 SCALAR 取值会 ClassCastException；
+        // 这里强制 ARRAY，与执行器的实际行表示保持一致
+        PhysTypeImpl.of(implementor.getTypeFactory(), getRowType(), JavaRowFormat.ARRAY, false);
     return implementor.result(physType, builder.toBlock());
   }
 

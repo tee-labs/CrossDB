@@ -875,11 +875,10 @@ class CrossDbScenariosTest {
 
     /** Q4 形态：EXISTS 过滤 + GROUP BY。 */
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：SEM(anti) join 后 GROUP BY u.id 触发 ClassCastException "
-        + "（Object[] 无法转 Integer），待修复后启用")
     void q4ExistsThenGroupBy() throws Exception {
+      // EXISTS 只过滤用户行（每人一行）：COUNT(*) 按用户计，匹配者各计 1
       try (CrossDb db = core()) {
-        assertEquals(List.of("1,2", "2,2"),
+        assertEquals(List.of("1,1", "2,1"),
             rows(db, "SELECT u.id, COUNT(*) FROM userdb.users u WHERE EXISTS "
                 + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id AND o.amount > 5) "
                 + "GROUP BY u.id ORDER BY u.id"));
@@ -1485,8 +1484,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：解析器 SQL conformance 未放行 APPLY（CROSS APPLY / OUTER APPLY），"
-        + "解析期即拒绝；需调整 SqlConformance 或改写为 LATERAL 后启用")
     void crossApplyCorrelatedMaxAmount() throws Exception {
       // CROSS APPLY = 相关派生表内连接语义：无订单的 carol 不出现
       try (CrossDb db = core()) {
@@ -1498,8 +1495,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：解析器 SQL conformance 未放行 APPLY（CROSS APPLY / OUTER APPLY），"
-        + "解析期即拒绝；需调整 SqlConformance 或改写为 LATERAL 后启用")
     void outerApplyKeepsUnmatchedOuterRows() throws Exception {
       // OUTER APPLY = LEFT 相关派生表：carol 保留且补 NULL
       try (CrossDb db = core()) {
@@ -1556,8 +1551,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：多行标量子查询的拒绝行为正确（未静默取行），"
-        + "但以 IllegalStateException（非受检）从 query() 泄出，应统一包装为 SQLException")
     void scalarSubqueryMultipleRowsRejected() throws Exception {
       // 多行标量子查询应为错误（标准 SQL 行为）
       try (CrossDb db = core()) {
@@ -1590,8 +1583,6 @@ class CrossDbScenariosTest {
   class MoreExpressions {
 
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：SIMILAR TO 被 Calcite JDBC convention 原样下推源库执行，"
-        + "H2 等源库不支持该语法直接报错；应本地改写为 LIKE/REGEXP 语义后再启用")
     void similarToPredicate() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("alice"),
@@ -1687,8 +1678,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @org.junit.jupiter.api.Disabled("缺陷：多列 COUNT(DISTINCT a, b) 被原样下推源库，"
-        + "H2/PostgreSQL 等主流后端不支持该语法（MySQL 支持）直接报错；应在本地实现多列去重聚合")
     void countDistinctMultipleColumns() throws Exception {
       // 多列 COUNT DISTINCT：(100,1),(100,2),(200,1),(100,3) 共 4 组
       try (CrossDb db = corePlusCreds()) {
@@ -1703,6 +1692,327 @@ class CrossDbScenariosTest {
             rows(db, "SELECT u.name, MAX(c.login) FROM userdb.users u "
                 + "JOIN credsdb.creds c ON c.user_id = u.id "
                 + "GROUP BY u.name ORDER BY u.name"));
+      }
+    }
+  }
+
+  // ---------- 相关派生表 APPLY / LATERAL（参考 SQL Server APPLY / PostgreSQL LATERAL 用例） ----------
+
+  @Nested
+  @DisplayName("APPLY 与 LATERAL 扩展场景")
+  class ApplyAndLateral {
+
+    @Test void crossApplyCorrelatedCount() throws Exception {
+      // 相关 COUNT：alice/orders 2 行、bob 2 行，carol 无订单不出现（内连接语义）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,2", "bob,2"),
+            rows(db, "SELECT u.name, d.n FROM userdb.users u "
+                + "CROSS APPLY (SELECT COUNT(*) AS n FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d ORDER BY u.name"));
+      }
+    }
+
+    @Test void outerApplyCountZeroFill() throws Exception {
+      // OUTER APPLY + COUNT：carol 保留且相关计数为 0（空集聚合语义）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,2", "bob,2", "carol,0"),
+            rows(db, "SELECT u.name, d.n FROM userdb.users u "
+                + "OUTER APPLY (SELECT COUNT(*) AS n FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d ORDER BY u.name"));
+      }
+    }
+
+    @Test void crossApplyFilterOnOutputColumn() throws Exception {
+      // 对 APPLY 输出列再过滤：alice(10)、bob(20) 满足 m>=10，carol 被内连接排除
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice", "bob"),
+            rows(db, "SELECT u.name FROM userdb.users u "
+                + "CROSS APPLY (SELECT MAX(o.amount) AS m FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d WHERE d.m >= 10 ORDER BY u.name"));
+      }
+    }
+
+    @Test void crossApplyThenOuterAggregate() throws Exception {
+      // APPLY 输出再聚合：alice/bob 相关计数均为 2，GROUP BY 计数得 2 组
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2,2"),
+            rows(db, "SELECT d.n, COUNT(*) FROM userdb.users u "
+                + "CROSS APPLY (SELECT COUNT(*) AS n FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d GROUP BY d.n"));
+      }
+    }
+
+    @Test void outerApplyOrderByOutputDesc() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob,20", "alice,10"),
+            rows(db, "SELECT u.name, d.m FROM userdb.users u "
+                + "CROSS APPLY (SELECT MAX(o.amount) AS m FROM orderdb.orders o "
+                + "WHERE o.user_id = u.id) d ORDER BY d.m DESC, u.name"));
+      }
+    }
+
+    @Test void lateralJoinCorrelatedCount() throws Exception {
+      // LATERAL 等价 CROSS APPLY ON TRUE 形态
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,2", "bob,2"),
+            rows(db, "SELECT u.name, d.n FROM userdb.users u JOIN LATERAL "
+                + "(SELECT COUNT(*) AS n FROM orderdb.orders o WHERE o.user_id = u.id) d "
+                + "ON TRUE ORDER BY u.name"));
+      }
+    }
+
+    @Test void analyzeOnApplyShowsBindJoin() throws Exception {
+      // APPLY 去相关后走 Bind Join 批内 IN 下推（引擎可见性）
+      try (CrossDb db = core()) {
+        String report = db.analyze("SELECT u.name, d.m FROM userdb.users u "
+            + "CROSS APPLY (SELECT MAX(o.amount) AS m FROM orderdb.orders o "
+            + "WHERE o.user_id = u.id) d");
+        assertTrue(report.contains("userdb") && report.contains("orderdb"), report);
+        assertTrue(report.contains("bindJoin"), report);
+      }
+    }
+  }
+
+  // ---------- SEMI/ANTI 深组合（参考 Calcite EXISTS 用例 / Vitess 半连接用例） ----------
+
+  @Nested
+  @DisplayName("SEMI/ANTI 深组合场景")
+  class SemiAntiCombinations {
+
+    @Test void antiThenGroupBy() throws Exception {
+      // ANTI 后 GROUP BY：仅 carol（id=3）无订单，组内 1 行
+      try (CrossDb db = core()) {
+        assertEquals(List.of("3,1"),
+            rows(db, "SELECT u.id, COUNT(*) FROM userdb.users u WHERE NOT EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id) "
+                + "GROUP BY u.id ORDER BY u.id"));
+      }
+    }
+
+    @Test void semiWithResidualFilterThenGroupByName() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,1", "bob,1"),
+            rows(db, "SELECT u.name, COUNT(*) FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id AND o.amount > 5) "
+                + "GROUP BY u.name ORDER BY u.name"));
+      }
+    }
+
+    @Test void existsWithOrOverTopLevelPredicate() throws Exception {
+      // EXISTS 与顶层谓词 OR：Bind Join 不改写（回退原生），结果须正确
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob", "carol"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id AND o.amount > 15) "
+                + "OR u.id = 3 ORDER BY u.name"));
+      }
+    }
+
+    @Test void nestedExistsAcrossThreeDbs() throws Exception {
+      // 两层相关 EXISTS（users←orders←creds）：有订单且订单用户有凭证 → alice、bob
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("alice", "bob"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id AND EXISTS "
+                + "(SELECT 1 FROM credsdb.creds c WHERE c.user_id = o.user_id)) "
+                + "ORDER BY u.name"));
+      }
+    }
+
+    @Test void semiWithJoinInsideSubquery() throws Exception {
+      // 内子查询含同库 JOIN（orders⋈small）：金额 ∈ {1,2} 的订单 103 → bob
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o JOIN userdb.small s ON s.id = o.amount "
+                + "WHERE o.user_id = u.id) ORDER BY u.name"));
+      }
+    }
+
+    @Test void semiThenLeftJoinComposition() throws Exception {
+      // SEMI 过滤后再 LEFT JOIN：alice/bob 各补 pings，carol 被 SEMI 排除
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("alice,1", "bob,NULL"),
+            rows(db, "SELECT u.name, p.id FROM userdb.users u "
+                + "LEFT JOIN pingdb.pings p ON p.user_id = u.id WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id) "
+                + "ORDER BY u.name, p.id"));
+      }
+    }
+  }
+
+  // ---------- 聚合扩展（参考 MySQL/PostgreSQL 聚合用例） ----------
+
+  @Nested
+  @DisplayName("聚合扩展场景")
+  class AggregateExtensions {
+
+    @Test void countDistinctCompositeWithGroupBy() throws Exception {
+      // 多列 COUNT DISTINCT + 分组：tenant 100 → (1,a1)(2,b1)(1,a2) 3 组；200 → 1 组
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("100,3", "200,1"),
+            rows(db, "SELECT tenant_id, COUNT(DISTINCT user_id, login) FROM credsdb.creds "
+                + "GROUP BY tenant_id ORDER BY tenant_id"));
+      }
+    }
+
+    @Test void countDistinctCompositeWithOtherAggregate() throws Exception {
+      // 多列 COUNT DISTINCT 与普通聚合混用：4 组 distinct，SUM(user_id)=1+2+1+3=7
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("4,7"),
+            rows(db, "SELECT COUNT(DISTINCT user_id, login), SUM(user_id) FROM credsdb.creds"));
+      }
+    }
+
+    @Test void countDistinctTwoCompositeSets() throws Exception {
+      // 两个不同的多列去重集合：(user_id,login) 4 组；(tenant_id,user_id) 4 组
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("4,4"),
+            rows(db, "SELECT COUNT(DISTINCT user_id, login), "
+                + "COUNT(DISTINCT tenant_id, user_id) FROM credsdb.creds"));
+      }
+    }
+
+    @Test void avgDistinct() throws Exception {
+      // AVG(DISTINCT)：user_id 去重 {1,2} → SUM/COUNT = 3/2；Calcite 整数 AVG 按整除
+      // 返回 1（引擎一致性语义，非 PostgreSQL 的 numeric 1.5）
+      try (CrossDb db = core()) {
+        assertEquals("1", scalar(db, "SELECT AVG(DISTINCT user_id) FROM orderdb.orders"));
+      }
+    }
+
+    @Test void avgCaseWhenRatio() throws Exception {
+      // 条件平均（占比形态）：金额 >= 10 的订单占比 = 2/4 = 0.5
+      try (CrossDb db = core()) {
+        assertEquals("0.5", scalar(db,
+            "SELECT AVG(CASE WHEN amount >= 10 THEN 1.0 ELSE 0.0 END) FROM orderdb.orders"));
+      }
+    }
+
+    @Test void bitAggregates() throws Exception {
+      // 位聚合：AND(100,101,102,103)=100，OR=103（二进制 ALL-ONES）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100,103"),
+            rows(db, "SELECT BIT_AND(id), BIT_OR(id) FROM orderdb.orders"));
+      }
+    }
+
+    @Test void havingWithScalarSubquery() throws Exception {
+      // HAVING 与标量子查询比较：最大分组计数为 2，alice/bob 各 2
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,2", "bob,2"),
+            rows(db, "SELECT u.name, COUNT(*) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id GROUP BY u.name HAVING COUNT(*) = "
+                + "(SELECT MAX(c) FROM (SELECT COUNT(*) AS c FROM orderdb.orders "
+                + "GROUP BY user_id) t) ORDER BY u.name"));
+      }
+    }
+
+    @Test void expressionOnBothSidesOfIn() throws Exception {
+      // IN 左侧与子查询输出均为表达式：tenant-99=1 匹配用户 1
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("1"),
+            rows(db, "SELECT id FROM userdb.users WHERE id + 0 IN "
+                + "(SELECT tenant_id - 99 FROM credsdb.creds WHERE login = 'a1') ORDER BY id"));
+      }
+    }
+  }
+
+  // ---------- 集合操作扩展（参考 PostgreSQL regress 集合用例） ----------
+
+  @Nested
+  @DisplayName("集合操作扩展场景")
+  class SetOpExtensions {
+
+    @Test void exceptAllMultisetSemantics() throws Exception {
+      // EXCEPT ALL 多重集语义：users{1,2,3} 减 orders{1,2,1,2}（按出现次数）→ {3}
+      try (CrossDb db = core()) {
+        assertEquals(List.of("3"),
+            rows(db, "SELECT id FROM userdb.users EXCEPT ALL "
+                + "SELECT user_id FROM orderdb.orders ORDER BY 1"));
+      }
+    }
+
+    @Test void exceptAllCountsDuplicates() throws Exception {
+      // 左侧重复行按次数抵消：{1,2,3,1,2,3} − {1,2,1,2} → {3,3}
+      try (CrossDb db = core()) {
+        assertEquals(List.of("3", "3"),
+            rows(db, "SELECT id FROM userdb.users UNION ALL SELECT id FROM userdb.users "
+                + "EXCEPT ALL SELECT user_id FROM orderdb.orders ORDER BY 1"));
+      }
+    }
+
+    @Test void exceptAllSelfCancellation() throws Exception {
+      // 自身 EXCEPT ALL 完全抵消为空
+      try (CrossDb db = core()) {
+        assertTrue(rows(db, "SELECT id FROM userdb.users EXCEPT ALL "
+            + "SELECT id FROM userdb.users ORDER BY 1").isEmpty());
+      }
+    }
+
+    @Test void intersectThreeWayChain() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1", "2"),
+            rows(db, "SELECT id FROM userdb.users INTERSECT "
+                + "SELECT id FROM userdb.users INTERSECT "
+                + "SELECT user_id FROM orderdb.orders ORDER BY 1"));
+      }
+    }
+
+    @Test void unionAllBooleanWithNulls() throws Exception {
+      // 布尔列与 NULL 的 UNION ALL：类型一致、NULL 原样保留
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("false", "false", "true", "true", "NULL", "NULL"),
+            rows(db, "SELECT flag FROM pingdb.pings UNION ALL "
+                + "SELECT flag FROM pingdb.pings ORDER BY 1 NULLS LAST"));
+      }
+    }
+  }
+
+  // ---------- 语法兼容（LENIENT conformance 放行形态，参考 SQL Server/MySQL 方言用例） ----------
+
+  @Nested
+  @DisplayName("语法兼容场景")
+  class ParserCompat {
+
+    @Test void notSimilarToPredicate() throws Exception {
+      // NOT SIMILAR TO：整串匹配 'a|b%'（'a' 或 'b%'）排除 alice/bob，保留 carol
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice", "carol"),
+            rows(db, "SELECT name FROM userdb.users WHERE name NOT SIMILAR TO 'a|b%' "
+                + "ORDER BY id"));
+      }
+    }
+
+    @Test void similarToWithEscapeClause() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice"),
+            rows(db, "SELECT name FROM userdb.users WHERE name SIMILAR TO 'a%' ESCAPE '\\'"));
+      }
+    }
+
+    @Test void bangEqualOperator() throws Exception {
+      // LENIENT conformance 放行 != （MySQL 方言）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1", "3"),
+            rows(db, "SELECT id FROM userdb.users WHERE id != 2 ORDER BY id"));
+      }
+    }
+
+    @Test void limitStartCountSyntax() throws Exception {
+      // MySQL 风格 LIMIT start, count
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2", "3"),
+            rows(db, "SELECT id FROM userdb.users ORDER BY id LIMIT 1, 2"));
+      }
+    }
+
+    @Test void coalesceInJoinKey() throws Exception {
+      // join key 含 COALESCE：p2(9) 无用户 9、p3(NULL→9) 亦无匹配，仅 p1 命中
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1"),
+            rows(db, "SELECT p.id FROM pingdb.pings p JOIN userdb.users u "
+                + "ON u.id = COALESCE(p.user_id, 9) ORDER BY p.id"));
       }
     }
   }
