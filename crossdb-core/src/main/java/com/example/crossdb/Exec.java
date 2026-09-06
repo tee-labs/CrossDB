@@ -46,8 +46,15 @@ final class Exec {
     RelNode rel = unwrap(plan);
     Bindable bindable = EnumerableInterpretable.toBindable(new HashMap<>(), spark(),
         (EnumerableRel) rel, EnumerableRel.Prefer.ARRAY);
-    Enumerable<Object[]> rows =
-        (Enumerable<Object[]>) bindable.bind(context(connection));
+    Enumerable<Object[]> rows;
+    try {
+      rows = (Enumerable<Object[]>) bindable.bind(context(connection));
+    } catch (SQLException e) {
+      throw e;
+    } catch (RuntimeException e) {
+      // 计划期已定的执行形态（如 SINGLE_VALUE 多行标量子查询校验）以受检异常统一暴露
+      throw new SQLException("crossdb: 查询执行失败: " + e.getMessage(), e);
+    }
     return resultSet(rows, rel.getRowType(), connection.getTypeFactory());
   }
 
@@ -146,14 +153,22 @@ final class Exec {
           Object[] cur = current[0] instanceof Object[] a ? a : null;
           return switch (method.getName()) {
             case "next" -> {
-              if (!it.hasNext()) {
-                current[0] = null;
-                yield false;
+              boolean hasNext;
+              try {
+                hasNext = it.hasNext();
+                if (hasNext) {
+                  Object r = it.next();
+                  // 单列行的 Enumerable 用裸标量表示，统一归一为 Object[]
+                  current[0] = r instanceof Object[] arr ? arr : new Object[]{r};
+                } else {
+                  current[0] = null;
+                }
+              } catch (RuntimeException e) {
+                // 迭代期执行失败（源库错误、Bind Join 批次、熔断等）统一以
+                // SQLException 暴露，根因挂 cause 链保留
+                throw new SQLException("crossdb: 结果集迭代失败: " + e.getMessage(), e);
               }
-              Object r = it.next();
-              // 单列行的 Enumerable 用裸标量表示，统一归一为 Object[]
-              current[0] = r instanceof Object[] arr ? arr : new Object[]{r};
-              yield true;
+              yield hasNext;
             }
             case "close" -> {
               if (it instanceof AutoCloseable closeable) {

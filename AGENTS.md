@@ -27,7 +27,7 @@ virtual threads).
 ## Commands
 
 ```bash
-mvn test                                                    # all 53 JUnit 5 tests (both modules)
+mvn test                                                    # all 259 JUnit 5 tests (both modules)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 ```
