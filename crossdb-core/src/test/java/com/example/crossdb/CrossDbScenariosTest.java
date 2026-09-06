@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -23,10 +22,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  * Presto・Trino（federated query）、Apache ShardingSphere（联邦查询集成用例）、
  * Vitess / MyCat（分片合并、NULL key 与批拆边界）等，按本引擎语义裁剪为
  * 共享 H2 内存夹具（Fixtures）。语义断言优先（结果正确性），少量用例额外断言下推形态。
- *
- * <p>暂未通过的用例以 {@code @Disabled("待修复: ...")} 标记并注明根因方向，
- * 留待后续修复后取消注解即可回归。注意：断言体保持标准 SQL 语义，
- * 不为当前缺陷行为放宽预期。
+ * 断言体保持标准 SQL 语义，不为缺陷行为放宽预期。
  */
 class CrossDbScenariosTest {
 
@@ -163,8 +159,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: 无分组聚合（COUNT(*)）直接叠在跨库 JOIN 上时生成代码编译失败"
-        + "（janino: 方法 select 未声明）；FULL JOIN 场景同样命中")
     void fullJoinCountsAllMatchedAndUnmatched() throws Exception {
       try (CrossDb db = core().register("eventdb", Fixtures.EVENTS)) {
         assertEquals("4", scalar(db, "SELECT COUNT(*) FROM userdb.users u "
@@ -173,7 +167,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: 同一 DataSource 注册为两个 schema 后跨库 JOIN 原生计划生成代码编译失败")
     void sameTableJoinedUnderTwoSchemas() throws Exception {
       // 同一 DataSource 注册成两个 schema：按跨库语义执行（跨分片同构表场景）
       try (CrossDb db = new CrossDb()
@@ -192,8 +185,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: VARCHAR 等值 key 跨库 JOIN 生成代码编译失败"
-        + "（janino: 方法 select 未声明）")
     void varcharKeyEquiJoin() throws Exception {
       // VARCHAR 等值 key：本夹具中登录名与用户名无交集，验证空结果正确
       try (CrossDb db = corePlusCreds()) {
@@ -203,7 +194,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: 表达式连接键（ON o.user_id + 0 = u.id）回退原生计划后生成代码编译失败")
     void expressionJoinKeyFallsBackButCorrect() throws Exception {
       // ON 两侧为表达式（非裸列对）：Bind Join 不改写，回退原生计划，结果须正确
       try (CrossDb db = core()) {
@@ -405,8 +395,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: HAVING 过滤跨库 JOIN 分组聚合时生成代码编译失败"
-        + "（janino: 方法 select 未声明）")
     void groupByHavingOnCount() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("alice,2", "bob,2"),
@@ -426,8 +414,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: COUNT(DISTINCT) 叠在跨库 JOIN 上时生成代码编译失败"
-        + "（janino: 方法 select 未声明）")
     void countDistinctOverJoin() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("2", scalar(db, "SELECT COUNT(DISTINCT o.user_id) "
@@ -436,7 +422,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: 注册夹具与断言待复核；复合键 JOIN + 双列 GROUP BY 组合待验证")
     void groupByTwoColumnsAfterCompositeBindJoin() throws Exception {
       try (CrossDb db = corePlusCreds().register("quotasdb", Fixtures.QUOTAS)) {
         assertEquals(List.of("100,1,1", "100,2,1", "200,1,1"),
@@ -448,7 +433,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: GROUP BY 表达式（MOD）叠加跨库 JOIN 时生成代码编译失败")
     void groupByExpressionMod() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("0,2", "1,2"),
@@ -548,8 +532,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: UNION ALL 分支内含跨库 JOIN 时生成代码编译失败"
-        + "（janino: 方法 select 未声明）")
     void joinInsideUnionAllBranch() throws Exception {
       try (CrossDb db = corePlusCreds()) {
         assertEquals("8", scalar(db, "SELECT COUNT(*) FROM "
@@ -584,7 +566,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: ORDER BY 表达式 + LIMIT 的 Top-N 下推生成代码编译失败")
     void orderByExpressionWithLimit() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("103", "102"),
@@ -595,7 +576,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: JOIN Top-N 下推带 OFFSET 时返回空结果（应返回偏移窗口内行，数据丢失）")
     void topNWithOffset() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("101", "102"),
@@ -648,8 +628,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: ORDER BY 引用未 SELECT 的列时，该列被泄漏为额外输出列"
-        + "（应仅作排序键，不进入结果集）")
     void orderByNonSelectedColumnLeaksIntoOutput() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("alice", "carol"),
@@ -820,8 +798,6 @@ class CrossDbScenariosTest {
   class EdgeCases {
 
     @Test
-    @Disabled("待修复: batchSize=1 时跨库 JOIN 未触发 IN 下推，回退原生计划全量拉取两侧"
-        + "（结果正确，但下推形态与配置预期不符）")
     void smallBatchSizeSplitsIntoMultipleInQueries() throws Exception {
       // batchSize=1：2 个 distinct key 应拆成 2 条 IN 下推（去重合批的另一侧边界）
       List<String> sqls = Collections.synchronizedList(new ArrayList<>());
@@ -838,8 +814,6 @@ class CrossDbScenariosTest {
     }
 
     @Test
-    @Disabled("待修复: JOIN + GROUP BY + ORDER BY + LIMIT 组合生成代码编译失败"
-        + "（janino: 方法 select 未声明）")
     void analyzeOnComplexQuery() throws Exception {
       // 复合查询（JOIN + GROUP BY + LIMIT）的 analyze 报告可用性
       try (CrossDb db = core()) {
