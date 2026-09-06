@@ -49,8 +49,11 @@ class TopNBindJoinRule extends RelOptRule {
       return false;
     }
     int leftCount = join.getLeft().getRowType().getFieldCount();
+    // 已是 Bind Join 计划（本规则的产物也满足 Join/Sort/Limit 形态）时不再触发，
+    // 否则 offset/fetch 会在驱动侧被反复下推叠加
     return sort.getCollation().getFieldCollations().stream()
-        .allMatch(fc -> fc.getFieldIndex() < leftCount);
+        .allMatch(fc -> fc.getFieldIndex() < leftCount)
+        && !(join instanceof EnumerableBindJoin);
   }
 
   @Override public void onMatch(RelOptRuleCall call) {
@@ -77,11 +80,22 @@ class TopNBindJoinRule extends RelOptRule {
     if (!(leftJdbc.getTraitSet().getConvention() instanceof JdbcConvention convention)) {
       return;
     }
-    // ORDER BY + OFFSET/FETCH 一起下推进驱动侧源库 SQL
+    // ORDER BY + LIMIT 一起下推进驱动侧源库 SQL：驱动侧返回前 offset+fetch 行
+    // （offset 不能同时在驱动侧与本地各裁一次——会跳过头 offset 行，丢数据），
+    // 本地 Sort/Limit 保留，对 join 放大后的前缀行集做最终偏移裁剪
+    if (limit.offset != null
+        && !(limit.offset instanceof org.apache.calcite.rex.RexLiteral)) {
+      return;
+    }
     RelCollation collation = sort.getCollation();
     RelTraitSet traits = leftJdbc.getCluster().traitSetOf(convention).replace(collation);
+    int pushFetch = org.apache.calcite.rex.RexLiteral.intValue(limit.fetch)
+        + (limit.offset == null
+            ? 0 : org.apache.calcite.rex.RexLiteral.intValue(limit.offset));
     JdbcSort pushed = new JdbcSort(leftJdbc.getCluster(), traits, leftJdbc,
-        collation, limit.offset, limit.fetch);
+        collation, null, leftJdbc.getCluster().getRexBuilder().makeLiteral(pushFetch,
+            leftJdbc.getCluster().getTypeFactory().createSqlType(
+                org.apache.calcite.sql.type.SqlTypeName.INTEGER), true));
     RelNode pushedEnum = new JdbcToEnumerableConverter(
         pushed.getCluster(),
         pushed.getCluster().traitSetOf(EnumerableConvention.INSTANCE), pushed) {

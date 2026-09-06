@@ -128,8 +128,12 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
     if (rightCost == null) {
       return null;
     }
-    double batches = Math.max(1.0, Math.ceil(leftRowCount / batchSize));
-    // 内表网络行数按权重计入 IO 成本：内表被谓词（过滤/传递谓词）压得越狠越优先
+    // 内表网络行数按权重计入 IO 成本：内表被谓词（过滤/传递谓词）压得越狠越优先；
+    // 另加内表子树自身代价（不乘批次数）——用于在内外侧可交换时（INNER/LEFT）偏向
+    // 更瘦的内表驱动方向。注意不能乘 ceil(leftRowCount/batchSize)：小批次配置
+    // （如 batchSize=1）会让本算子输给原生计划，退化为两侧全表拉取——与
+    // 「跨库等值 JOIN 一律优先 Bind Join，回退仅由触发条件（结构不满足）决定」
+    // 的引擎策略相悖。
     double io = rightRowCount * 0.1;
     if (getJoinType() == JoinRelType.SEMI || getJoinType() == JoinRelType.ANTI) {
       // ponytail: Calcite 给原生 hash 半连接自价 0.01×0（近乎免费），此处只能同为 0，
@@ -139,7 +143,7 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
     }
     return planner.getCostFactory()
         .makeCost(rowCount + leftRowCount + io, 0, io)
-        .plus(rightCost.multiplyBy(batches));
+        .plus(rightCost);
   }
 
   @Override public EnumerableRel.Result implement(EnumerableRelImplementor implementor,
@@ -164,8 +168,20 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
     final ParameterExpression lrow =
         Expressions.parameter(leftResult.physType.getJavaRowType(), "lrow");
     final BlockBuilder mapperBlock = new BlockBuilder();
-    mapperBlock.add(Expressions.return_(null,
-        leftResult.physType.convertTo(lrow, JavaRowFormat.ARRAY)));
+    // 注意：不能用 PhysType.convertTo——它生成「Enumerable 级」.select（对行值调用
+    // 会编译失败，janino: 方法 select 未声明），仅在左侧行型本身是 ARRAY 时恒等
+    // 才碰巧可用。这里按格式逐字段取值，手动构造成 Object[] 行。
+    final Expression mappedRow;
+    if (leftResult.physType.getFormat() == JavaRowFormat.ARRAY) {
+      mappedRow = lrow;
+    } else {
+      final List<Expression> fields = new ArrayList<>(leftWidth);
+      for (int i = 0; i < leftWidth; i++) {
+        fields.add(leftResult.physType.fieldReference(lrow, i));
+      }
+      mappedRow = Expressions.newArrayInit(Object.class, fields);
+    }
+    mapperBlock.add(Expressions.return_(null, mappedRow));
     final Expression mapper = Expressions.lambda(Function1.class, mapperBlock.toBlock(), lrow);
     final Expression leftRows = builder.append("leftRows",
         Expressions.call(leftE, BuiltInMethod.SELECT.method, mapper));

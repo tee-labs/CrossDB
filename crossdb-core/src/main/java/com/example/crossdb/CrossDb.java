@@ -27,6 +27,7 @@ import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Properties;
 
@@ -173,6 +174,27 @@ public class CrossDb implements AutoCloseable {
       RelRoot root = planner.rel(validated);
       best = planner.transform(0,
           root.rel.getTraitSet().replace(EnumerableConvention.INSTANCE), root.rel);
+      // 优化后行型可能宽于验证后的输出行型（如 ORDER BY 引用未 SELECT 的列/表达式键，
+      // 排序列会留在计划输出里），按 root.fields 补最终投影裁掉，避免输出列泄漏
+      final RelNode optimized = best;
+      RelRoot trimmed = root.withRel(optimized);
+      if (!trimmed.isRefTrivial()) {
+        org.apache.calcite.rex.RexBuilder rexBuilder =
+            optimized.getCluster().getRexBuilder();
+        List<org.apache.calcite.rex.RexNode> exprs = new java.util.ArrayList<>();
+        List<String> names = new java.util.ArrayList<>();
+        trimmed.fields.forEach((ordinal, name) -> {
+          exprs.add(rexBuilder.makeInputRef(optimized, ordinal));
+          names.add(name);
+        });
+        org.apache.calcite.rel.type.RelDataType outRow =
+            rexBuilder.getTypeFactory().createStructType(
+                exprs.stream().map(org.apache.calcite.rex.RexNode::getType).toList(),
+                names);
+        best = org.apache.calcite.adapter.enumerable.EnumerableCalc.create(optimized,
+            org.apache.calcite.rex.RexProgram.create(optimized.getRowType(), exprs, null,
+                outRow, rexBuilder));
+      }
       if (Boolean.getBoolean("crossdb.debug")) {
         System.err.println(RelOptUtil.toString(best));
       }

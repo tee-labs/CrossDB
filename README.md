@@ -47,7 +47,7 @@ try (CrossDb db = new CrossDb()) {
 | Bind Join | 跨库 INNER/LEFT/RIGHT/FULL/SEMI/ANTI 等值 JOIN 自动改写：外表 key 每批 `batchSize` 个去重后以 `IN (?)` 下推内表库，`parallelism` 个虚拟线程并发拉取，本地 hash 探测；LEFT/FULL 未匹配外表行补 NULL，FULL 再对内表补一次分块 `NOT IN` 反连接；RIGHT 交换内外侧执行、行型保持原始 [左 ++ 右]；SEMI/ANTI 只输出外表行（内表只回传命中 key） |
 | 复合键 tuple-IN | 多列等值键（`ON a.k1=b.k1 AND a.k2=b.k2`）在 H2/MySQL/PostgreSQL/Oracle 生成 `(k1,k2) IN ((?,?),...)`，其余方言降级为 `(k1=? AND k2=?) OR ...`；单批 key 超 1000（Oracle IN 上限）自动拆为 `IN (...) OR IN (...)` |
 | EXISTS / NOT EXISTS | `EXISTS`/`IN` 子查询去相关后的 SEMI Join 走 IN 下推；`NOT EXISTS` 去相关为「LEFT JOIN + 常量标记列 IS NULL」形态，由 `AntiBindJoinFilterRule` 改写为 ANTI Bind Join（投影只引用外表列时生效）；`NOT IN` 展开为计数聚合形态、无等值连接对，走原生计划（结果正确） |
-| Top-N 下推 | `ORDER BY <驱动侧列> + LIMIT` 下推进驱动侧源库 SQL（ORDER BY + FETCH/LIMIT），源库只返回 LIMIT 行；本地仍保留 Sort/Limit 保证语义 |
+| Top-N 下推 | `ORDER BY <驱动侧列> + LIMIT` 下推进驱动侧源库 SQL（ORDER BY + FETCH；带 OFFSET 时源库返回前 offset+fetch 行，OFFSET 只在本地裁剪一次），本地仍保留 Sort/Limit 保证语义 |
 | 分片合并 Top-N | `UNION ALL` 多库合并 + `ORDER BY + LIMIT`（`ShardTopNRule`）：每个分支源库 SQL 带上 ORDER BY + 裁剪（每库只回 offset+fetch 行），本地归并排序后按原 offset/fetch 裁剪；仅限 UNION ALL（UNION 去重语义不可按分支裁剪） |
 | 传递谓词下推 | 驱动侧 join key 上的常量条件自动补到内表侧源库 SQL（去重：内表已有等值过滤不重复包裹） |
 | 哈希窗口淘汰 | 驱动侧按 join key 有序（如排序下推后的计划）时，每窗口合并前淘汰更小的 key，内表哈希内存从 O(distinct keys) 降为 O(窗口 keys)；检测保守，宁可不淘汰不错杀匹配 |
@@ -167,7 +167,7 @@ safeMode 与 FULL JOIN 的补充边界：
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
 - `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截（含 FULL 反连接退化拦截）、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝、schema 重名/空名拒绝、ResultSet 取值 API（typed getter / wasNull / 元数据））；
-- `CrossDbScenariosTest`：跨库 SQL 场景覆盖（参考 Calcite/Presto・Trino/ShardingSphere/Vitess 等同类系统用例设计）：JOIN 家族（三库链式、左右/全外连接、NULL key、同库混合、子查询内表、表达式键）、子查询（IN/EXISTS/NOT EXISTS 双方向、标量子查询、派生表）、聚合（无分组多列聚合、HAVING、COUNT DISTINCT、分组表达式、空集聚合）、集合操作（UNION/INTERSECT/EXCEPT、带标签列合并、三分支 Top-N）、排序分页（多列/别名/OFFSET/LIMIT 0）、CTE（过滤/聚合/嵌套）、表达式函数（CASE/字符串/数值/IS NULL/LIKE/BETWEEN）、边界形态（小批次拆分、safeMode 组合、引号标识符）。其中标记 `@Disabled("待修复: ...")` 的用例为当前未通过场景（生成代码编译失败、JOIN Top-N OFFSET 返回空、ORDER BY 非选择列泄漏等），已注明根因方向，修复后取消注解即可回归；
+- `CrossDbScenariosTest`：跨库 SQL 场景覆盖（参考 Calcite/Presto・Trino/ShardingSphere/Vitess 等同类系统用例设计）：JOIN 家族（三库链式、左右/全外连接、NULL key、同库混合、子查询内表、表达式键）、子查询（IN/EXISTS/NOT EXISTS 双方向、标量子查询、派生表）、聚合（无分组多列聚合、HAVING、COUNT DISTINCT、分组表达式、空集聚合）、集合操作（UNION/INTERSECT/EXCEPT、带标签列合并、三分支 Top-N）、排序分页（多列/别名/OFFSET/LIMIT 0）、CTE（过滤/聚合/嵌套）、表达式函数（CASE/字符串/数值/IS NULL/LIKE/BETWEEN）、边界形态（小批次拆分、safeMode 组合、引号标识符）；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。
