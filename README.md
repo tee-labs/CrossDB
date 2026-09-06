@@ -162,11 +162,12 @@ safeMode 与 FULL JOIN 的补充边界：
 
 ## 单元测试覆盖
 
-61 个测试分四组：
+142 个测试分五组：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
 - `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截（含 FULL 反连接退化拦截）、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝、schema 重名/空名拒绝、ResultSet 取值 API（typed getter / wasNull / 元数据））；
+- `CrossDbScenariosTest`：跨库 SQL 场景覆盖（参考 Calcite/Presto・Trino/ShardingSphere/Vitess 等同类系统用例设计）：JOIN 家族（三库链式、左右/全外连接、NULL key、同库混合、子查询内表、表达式键）、子查询（IN/EXISTS/NOT EXISTS 双方向、标量子查询、派生表）、聚合（无分组多列聚合、HAVING、COUNT DISTINCT、分组表达式、空集聚合）、集合操作（UNION/INTERSECT/EXCEPT、带标签列合并、三分支 Top-N）、排序分页（多列/别名/OFFSET/LIMIT 0）、CTE（过滤/聚合/嵌套）、表达式函数（CASE/字符串/数值/IS NULL/LIKE/BETWEEN）、边界形态（小批次拆分、safeMode 组合、引号标识符）。其中标记 `@Disabled("待修复: ...")` 的用例为当前未通过场景（生成代码编译失败、JOIN Top-N OFFSET 返回空、ORDER BY 非选择列泄漏等），已注明根因方向，修复后取消注解即可回归；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。
