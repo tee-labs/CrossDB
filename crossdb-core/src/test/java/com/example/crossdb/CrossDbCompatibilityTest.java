@@ -88,8 +88,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待修复: USING 共享列在 SELECT 裸引用触发校验器 AssertionError"
-        + "（SqlValidatorImpl.expandCommonColumn），待支持")
     void usingSharedColumnBareReferenceCrashes() throws Exception {
       try (CrossDb db = corePlusCreds()) {
         assertEquals(List.of("a1,10,1", "a2,5,1", "b1,20,2"),
@@ -108,12 +106,11 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: 表别名带列名清单 FROM t(a, b)（标准 SQL/PostgreSQL）校验不识别，待支持")
     void tableAliasWithColumnList() throws Exception {
-      // 别名列清单（标准 SQL / PostgreSQL 支持）：t(name, uid)
+      // 别名列清单（标准 SQL / PostgreSQL 支持）：按位置改名 users(id, name) → t(uid, name)
       try (CrossDb db = core()) {
         assertEquals(List.of("alice,1"),
-            rows(db, "SELECT n, uid FROM userdb.users t(name, uid) WHERE uid = 1"));
+            rows(db, "SELECT name, uid FROM userdb.users t(uid, name) WHERE uid = 1"));
       }
     }
 
@@ -346,8 +343,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: CUME_DIST 窗口聚合在 Enumerable 约定下不可实现"
-        + "（Unable to get aggregate implementation），待支持")
     void cumeDistOnSingleTable() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("100,0.25", "101,0.5", "102,0.75", "103,1.0"),
@@ -357,23 +352,22 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: PERCENT_RANK 窗口聚合在 Enumerable 约定下不可实现，待支持")
     void percentRankWithTies() throws Exception {
-      // 含并列（alice 2 行）：PERCENT_RANK = (rank-1)/(n-1)，并列同为 0.0/0.333.../1.0
+      // 含并列（alice 2 行）：PERCENT_RANK = (RANK-1)/(n-1)，并列同分 → 去重后 2 个值
       try (CrossDb db = core()) {
         List<String> r = rows(db, "SELECT DISTINCT CAST(PERCENT_RANK() OVER "
             + "(ORDER BY u.name) AS DECIMAL(4,3)) FROM userdb.users u "
             + "JOIN orderdb.orders o ON o.user_id = u.id ORDER BY 1");
-        assertEquals(3, r.size());
+        assertEquals(2, r.size());
         assertEquals(0, new BigDecimal(r.get(0)).compareTo(new BigDecimal("0")));
-        assertEquals(0, new BigDecimal(r.get(1)).compareTo(new BigDecimal("0.333")));
-        assertEquals(0, new BigDecimal(r.get(2)).compareTo(new BigDecimal("1")));
+        assertEquals(0, new BigDecimal(r.get(1)).compareTo(new BigDecimal("0.666")));
       }
     }
 
     @Test
-    @Disabled("待修复: NTH_VALUE 默认窗口帧与标准 SQL 不一致——首行即可见后行"
-        + "（标准默认帧 RANGE UNBOUNDED PRECEDING AND CURRENT ROW，首行应为 NULL），待修复")
+    @Disabled("待支持: Calcite 本地实现与源库（H2）的 NTH_VALUE 均忽略窗口帧、按整分区取值"
+        + "（标准默认帧 RANGE UNBOUNDED PRECEDING AND CURRENT ROW 下首行应为 NULL）；"
+        + "本地 UDAF 重实现方案受 Calcite 窗口常量列裁剪缺陷限制，待支持")
     void nthValueWindow() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("100,NULL", "101,101", "102,101", "103,101"),
@@ -425,7 +419,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: STRING_AGG 未注册（Calcite library 函数），待支持")
     void stringAggPostgresAlias() throws Exception {
       // PostgreSQL 风格 STRING_AGG
       try (CrossDb db = core()) {
@@ -435,7 +428,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: GROUP_CONCAT 未注册（MySQL library 函数），待支持")
     void groupConcatMysqlSyntax() throws Exception {
       // MySQL 风格 GROUP_CONCAT
       try (CrossDb db = core()) {
@@ -445,8 +437,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待修复: VAR_POP/STDDEV_POP 对整数输入被截断为整数"
-        + "（50/7，PostgreSQL 等标准语义应为 50.5/7.106），待修复")
     void varianceAndStddevAggregates() throws Exception {
       // 方差/标准差：amount {10,20,5,1}，VAR_POP=50.5，STDDEV_POP=√50.5≈7.11
       try (CrossDb db = core()) {
@@ -479,7 +469,6 @@ class CrossDbCompatibilityTest {
   class FuncCompat {
 
     @Test
-    @Disabled("待修复: INITCAP 被原样下推到源库执行而 H2 无此函数；未注册函数应本地求值，待修复")
     void initcapFunction() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("Alice", scalar(db,
@@ -488,7 +477,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: LPAD/RPAD 未注册（Calcite library 函数），待支持")
     void lpadRpadFunctions() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("007,abxx"),
@@ -497,15 +485,13 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: REPEAT 未注册，待支持")
     void repeatFunction() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("aba", scalar(db, "SELECT REPEAT('ab', 2) || 'a' FROM userdb.small LIMIT 1"));
+        assertEquals("ababa", scalar(db, "SELECT REPEAT('ab', 2) || 'a' FROM userdb.small LIMIT 1"));
       }
     }
 
     @Test
-    @Disabled("待修复: OVERLAY 被原样下推到源库执行而 H2 无此函数；应本地求值，待修复")
     void overlayStandardSyntax() throws Exception {
       // 标准 SQL OVERLAY（PostgreSQL 支持）
       try (CrossDb db = core()) {
@@ -531,7 +517,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: ASCII/CHR 未注册，待支持")
     void asciiAndChrFunctions() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("65,A"),
@@ -540,7 +525,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: GREATEST/LEAST 未注册，待支持")
     void greatestLeastFunctions() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("5,0"),
@@ -549,13 +533,12 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: NVL/IFNULL 未注册，待支持")
     void nvlAndIfnull() throws Exception {
       // Oracle NVL / MySQL IFNULL
       try (CrossDb db = corePlusPings()) {
-        assertEquals(List.of("a,0", "b,0", "NULL,d"),
+        assertEquals(List.of("a,a", "b,b", "NULL,d"),
             rows(db, "SELECT note, NVL(note, 'd') FROM pingdb.pings ORDER BY id"));
-        assertEquals("0", scalar(db,
+        assertEquals("1", scalar(db,
             "SELECT COUNT(*) FROM pingdb.pings WHERE IFNULL(note, '') = 'b'"));
       }
     }
@@ -585,8 +568,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待修复: FLOOR(ts TO DAY) 下推源库后语法变形（源方言不支持 datetime 截断）；"
-        + "应本地求值，待修复")
     void floorTimestampToDay() throws Exception {
       // FLOOR(timestamp TO 单位)（标准 SQL datetime 截断）
       try (CrossDb db = corePlusPings()) {
@@ -638,7 +619,8 @@ class CrossDbCompatibilityTest {
   class DialectFeatures {
 
     @Test
-    @Disabled("待支持: 递归 CTE 触发引擎 NPE（CalciteSchema table 为 null），待支持")
+    @Disabled("待支持: Calcite 内核无 RepeatUnion 物理算子，递归 CTE 无法落地执行计划"
+        + "（需自研迭代执行算子），待支持")
     void recursiveCteCounting() throws Exception {
       // WITH RECURSIVE 计数到 3（PostgreSQL regress 经典形态）
       try (CrossDb db = core()) {
@@ -658,7 +640,6 @@ class CrossDbCompatibilityTest {
     }
 
     @Test
-    @Disabled("待支持: SQL Server TOP 语法解析不支持，待评估")
     void topNSqlServerSyntax() throws Exception {
       // SQL Server TOP 语法
       try (CrossDb db = core()) {

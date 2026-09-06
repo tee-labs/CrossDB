@@ -7,6 +7,7 @@ import java.sql.ResultSet;
 import java.sql.SQLException;
 import java.sql.Statement;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -444,7 +445,9 @@ public class Main {
 
   private static javax.sql.DataSource recording(javax.sql.DataSource delegate,
       List<String> sqls, List<String> props) {
-    return Recording.dataSource(delegate, sqls, props);
+    // 并发拉取（parallelism>1）会多线程追加记录，统一包同步列表防丢失更新
+    return Recording.dataSource(delegate,
+        Collections.synchronizedList(sqls), Collections.synchronizedList(props));
   }
 
   private static void check(boolean ok, String message) {
