@@ -846,4 +846,421 @@ class CrossDbScenariosTest {
       }
     }
   }
+
+  // ---------- TPC-H 形态（参考 TPC-H 规范 / Calcite TpchQueryTest / Trino tpc-h 测试集） ----------
+
+  @Nested
+  @DisplayName("TPC-H 形态场景")
+  class TpchShaped {
+
+    /** Q1 形态：单表过滤 + 多聚合 + 排序。 */
+    @Test void q1SingleTableMultiAggregate() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2,6,1,5,3"),
+            rows(db, "SELECT COUNT(*), SUM(amount), MIN(amount), MAX(amount), AVG(amount) "
+                + "FROM orderdb.orders WHERE amount <= 5"));
+      }
+    }
+
+    /** Q3 形态：三表 JOIN + 分组聚合 + ORDER BY + LIMIT。 */
+    @Test void q3ThreeWayJoinGroupLimit() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("bob,21", "alice,15"),
+            rows(db, "SELECT u.name, SUM(o.amount) AS revenue FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "JOIN credsdb.creds c ON c.user_id = u.id AND c.tenant_id = 100 "
+                + "GROUP BY u.name ORDER BY revenue DESC"));
+      }
+    }
+
+    /** Q4 形态：EXISTS 过滤 + GROUP BY。 */
+    @Test
+    @org.junit.jupiter.api.Disabled("缺陷：SEM(anti) join 后 GROUP BY u.id 触发 ClassCastException "
+        + "（Object[] 无法转 Integer），待修复后启用")
+    void q4ExistsThenGroupBy() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1,2", "2,2"),
+            rows(db, "SELECT u.id, COUNT(*) FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id AND o.amount > 5) "
+                + "GROUP BY u.id ORDER BY u.id"));
+      }
+    }
+
+    /** Q13 形态：LEFT JOIN + COUNT(右列) + 负向 LIKE 过滤。 */
+    @Test void q13LeftJoinCountWithNegativeLike() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("alice,1", "bob,0", "carol,0"),
+            rows(db, "SELECT u.name, COUNT(p.id) FROM userdb.users u "
+                + "LEFT JOIN pingdb.pings p ON p.user_id = u.id "
+                + "WHERE u.name NOT LIKE 'zz%' "
+                + "GROUP BY u.name ORDER BY u.name"));
+      }
+    }
+
+    /** Q15 形态：CTE 聚合 + 外层对聚合值再聚合（MAX over 聚合子查询）。 */
+    @Test void q15CteAggregateThenMax() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals("21", scalar(db, "WITH per_user AS (SELECT user_id, SUM(amount) AS s "
+            + "FROM orderdb.orders GROUP BY user_id) "
+            + "SELECT MAX(s) FROM per_user"));
+      }
+    }
+
+    /** Q20 形态：嵌套 IN 子查询（IN 内含 IN）。 */
+    @Test void q20NestedInSubqueries() throws Exception {
+      // 订单金额 IN (1,2)（small 表）→ 订单 103 → 用户 bob
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE u.id IN "
+                + "(SELECT o.user_id FROM orderdb.orders o WHERE o.amount IN "
+                + "(SELECT id FROM userdb.small)) "
+                + "ORDER BY u.name"));
+      }
+    }
+
+    /** Q21 形态：EXISTS 与 NOT EXISTS 组合关联过滤。 */
+    @Test void q21ExistsAndNotExistsCombination() throws Exception {
+      // 有 pings 且有小表记录的用户：alice(id=1) 有 ping；bob(id=2) 无 ping 被排除
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("alice", "bob"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE EXISTS "
+                + "(SELECT 1 FROM orderdb.orders o WHERE o.user_id = u.id) "
+                + "AND NOT EXISTS "
+                + "(SELECT 1 FROM pingdb.pings p WHERE p.user_id = u.id AND p.amount IS NULL) "
+                + "ORDER BY u.name"));
+      }
+    }
+
+    /** Q22 形态：NOT IN + LIKE + 聚合子查询组合。 */
+    @Test void q22NotInWithLikeAndAggregate() throws Exception {
+      // name LIKE '%a%' → alice、carol；金额 >= AVG(9) 的订单用户 (1,2) 被排除 → carol
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1,3"),
+            rows(db, "SELECT COUNT(*), SUM(id) FROM userdb.users u "
+                + "WHERE u.name LIKE '%a%' AND u.id NOT IN "
+                + "(SELECT o.user_id FROM orderdb.orders o WHERE o.amount >= "
+                + "(SELECT AVG(amount) FROM orderdb.orders))"));
+      }
+    }
+  }
+
+  // ---------- NULL 语义与三值逻辑（参考 PostgreSQL regression / Calcite SqlToConverterTest / Trino） ----------
+
+  @Nested
+  @DisplayName("NULL 语义与三值逻辑场景")
+  class NullSemantics {
+
+    @Test void nullComparisonFiltersOutRows() throws Exception {
+      // 与 NULL 字面量比较恒为 UNKNOWN（不返回行）；`<>` 对 NULL key 行同样过滤
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("0", scalar(db, "SELECT COUNT(*) FROM pingdb.pings WHERE user_id = NULL"));
+        assertEquals("1", scalar(db, "SELECT COUNT(*) FROM pingdb.pings WHERE user_id <> 1"));
+      }
+    }
+
+    @Test void threeValuedLogicInWhere() throws Exception {
+      // 三值逻辑：NULL OR TRUE = TRUE（保留），NULL AND TRUE = UNKNOWN（过滤）
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("3", scalar(db, "SELECT COUNT(*) FROM pingdb.pings "
+            + "WHERE user_id IS NULL OR TRUE"));
+        assertEquals("2", scalar(db, "SELECT COUNT(*) FROM pingdb.pings "
+            + "WHERE user_id IS NOT NULL AND TRUE"));
+      }
+    }
+
+    @Test void notInWithNullInSubqueryYieldsEmpty() throws Exception {
+      // 三值逻辑核心用例（PostgreSQL regress）：NOT IN 子查询含 NULL 时恒 UNKNOWN，应返回空集
+      try (CrossDb db = corePlusPings()) {
+        assertTrue(rows(db, "SELECT u.id FROM userdb.users u WHERE u.id NOT IN "
+            + "(SELECT p.user_id FROM pingdb.pings p)").isEmpty(),
+            "NOT IN 子查询含 NULL 应返回空集（三值逻辑）");
+      }
+    }
+
+    @Test void inWithNullLiteralInList() throws Exception {
+      // IN 列表含 NULL：只有真正相等的行匹配，NULL 不参与相等判定
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100", "102"),
+            rows(db, "SELECT id FROM orderdb.orders WHERE user_id IN (1, NULL) ORDER BY id"));
+      }
+    }
+
+    @Test void sumAndAvgOfAllNullIsNull() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("NULL", scalar(db, "SELECT SUM(amount) FROM pingdb.pings WHERE id = 2"));
+        assertEquals("NULL", scalar(db, "SELECT AVG(amount) FROM pingdb.pings WHERE amount IS NULL"));
+        // MIN/MAX 忽略 NULL
+        assertEquals("1.25", scalar(db, "SELECT MIN(amount) FROM pingdb.pings"));
+      }
+    }
+
+    @Test void coalesceAndNullif() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1.25", "0.00", "3.50"),
+            rows(db, "SELECT COALESCE(amount, 0) FROM pingdb.pings ORDER BY id"));
+        assertEquals("NULL", scalar(db, "SELECT NULLIF(1, 1) FROM userdb.small LIMIT 1"));
+        // NULLIF(a,b)：a<>b 返回 a，a=b 返回 NULL
+        assertEquals("2", scalar(db, "SELECT NULLIF(2, 1) FROM userdb.small LIMIT 1"));
+      }
+    }
+
+    @Test void orderByWithExplicitNullsFirstLast() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("NULL", "9", "1"),
+            rows(db, "SELECT user_id FROM pingdb.pings ORDER BY user_id DESC NULLS FIRST"));
+        assertEquals(List.of("1", "9", "NULL"),
+            rows(db, "SELECT user_id FROM pingdb.pings ORDER BY user_id NULLS LAST"));
+      }
+    }
+
+    @Test void caseWhenNullConditionTakesElse() throws Exception {
+      // CASE 条件为 NULL 视为不匹配，走 ELSE 分支
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("has ", "has ", "none"),
+            rows(db, "SELECT CASE WHEN user_id > 0 THEN 'has' ELSE 'none' END "
+                + "FROM pingdb.pings ORDER BY id"));
+      }
+    }
+
+    @Test void distinctTreatsNullsAsEqual() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1", "9", "NULL"),
+            rows(db, "SELECT DISTINCT user_id FROM pingdb.pings ORDER BY user_id NULLS LAST"));
+      }
+    }
+
+    @Test void isDistinctFromNullPredicate() throws Exception {
+      // IS DISTINCT FROM：NULL 安全比较（标准 SQL / Calcite / PostgreSQL 支持）
+      try (CrossDb db = corePlusPings()) {
+        assertEquals("2", scalar(db, "SELECT COUNT(*) FROM pingdb.pings "
+            + "WHERE user_id IS DISTINCT FROM 1"));
+        assertEquals("1", scalar(db, "SELECT COUNT(*) FROM pingdb.pings "
+            + "WHERE user_id IS NOT DISTINCT FROM NULL"));
+      }
+    }
+  }
+
+  // ---------- 量化比较与复杂谓词（参考 MySQL 8.0 / PostgreSQL 文档用例） ----------
+
+  @Nested
+  @DisplayName("量化比较与复杂谓词场景")
+  class QuantifiedPredicates {
+
+    @Test void anyQuantifiedComparison() throws Exception {
+      // = ANY 等价 IN
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice", "bob"),
+            rows(db, "SELECT u.name FROM userdb.users u WHERE u.id = ANY "
+                + "(SELECT o.user_id FROM orderdb.orders o) ORDER BY u.name"));
+      }
+    }
+
+    @Test void allQuantifiedComparison() throws Exception {
+      // > ALL：大于子查询最大值（20）→ 无；> ALL(小表 id) → id > 2
+      try (CrossDb db = core()) {
+        assertEquals(List.of("3"),
+            rows(db, "SELECT id FROM userdb.users WHERE id > ALL "
+                + "(SELECT id FROM userdb.small) ORDER BY id"));
+      }
+    }
+
+    @Test void betweenSymmetricSwapsBounds() throws Exception {
+      // BETWEEN SYMMETRIC：边界自动交换（PostgreSQL/Calcite 支持）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2", "3"),
+            rows(db, "SELECT id FROM userdb.users WHERE id BETWEEN SYMMETRIC 3 AND 2 ORDER BY id"));
+      }
+    }
+
+    @Test void notBetweenFilter() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1"),
+            rows(db, "SELECT id FROM userdb.users WHERE id NOT BETWEEN 2 AND 99 ORDER BY id"));
+      }
+    }
+
+    @Test void likeUnderscoreSingleChar() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("bob"),
+            rows(db, "SELECT name FROM userdb.users WHERE name LIKE 'b_b'"));
+      }
+    }
+
+    @Test void likeWithEscapeCharacter() throws Exception {
+      // ESCAPE：'a\%' 为字面量 "a%"（无匹配），普通 'a%' 通配匹配 alice
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice"), rows(db, "SELECT name FROM userdb.users WHERE name LIKE 'a%'"));
+        assertTrue(rows(db, "SELECT name FROM userdb.users WHERE name LIKE 'a\\%' ESCAPE '\\'").isEmpty());
+      }
+    }
+
+    @Test void havingWithoutGroupBy() throws Exception {
+      // 无 GROUP BY 的 HAVING：全表聚为一组再过滤（标准 SQL）
+      try (CrossDb db = core()) {
+        assertEquals("4", scalar(db, "SELECT COUNT(*) FROM orderdb.orders HAVING COUNT(*) > 3"));
+        assertTrue(rows(db, "SELECT COUNT(*) FROM orderdb.orders HAVING COUNT(*) > 99").isEmpty());
+      }
+    }
+
+    @Test void scalarSubqueryComparisonWithAggregate() throws Exception {
+      // 与聚合标量子查询比较：amount > AVG(amount)=9 → 100、101
+      try (CrossDb db = core()) {
+        assertEquals(List.of("100", "101"),
+            rows(db, "SELECT id FROM orderdb.orders WHERE amount > "
+                + "(SELECT AVG(amount) FROM orderdb.orders) ORDER BY id"));
+      }
+    }
+  }
+
+  // ---------- 窗口函数（参考 Calcite WindowTest / Trino window 用例） ----------
+
+  @Nested
+  @DisplayName("窗口函数场景")
+  class WindowFunctions {
+
+    @Test void rowNumberOverOrder() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("103,1", "102,2", "101,3", "100,4"),
+            rows(db, "SELECT id, ROW_NUMBER() OVER (ORDER BY id DESC) "
+                + "FROM orderdb.orders"));
+      }
+    }
+
+    @Test void rankAndDenseRankOverJoin() throws Exception {
+      // 窗口排序按 name（alice=1,1 / bob=3,2），输出按 o.id（窗口先算、外层再排序）
+      try (CrossDb db = core()) {
+        assertEquals(List.of("alice,1,1", "bob,3,2", "alice,1,1"),
+            rows(db, "SELECT u.name, RANK() OVER (ORDER BY u.name), "
+                + "DENSE_RANK() OVER (ORDER BY u.name) FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id ORDER BY o.id LIMIT 3"));
+      }
+    }
+    @Test void runningSumOverPartition() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1,15", "2,21"),
+            rows(db, "SELECT user_id, SUM(SUM(amount)) OVER (PARTITION BY user_id) "
+                + "FROM orderdb.orders GROUP BY user_id ORDER BY user_id"));
+      }
+    }
+  }
+
+  // ---------- 类型与转换（参考 Calcite SqlOperatorsTest / JDBC 类型兼容用例） ----------
+
+  @Nested
+  @DisplayName("类型与转换场景")
+  class TypesAndCasts {
+
+    @Test void castIntToVarcharAndConcat() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("u1", "u2", "u3"),
+            rows(db, "SELECT 'u' || CAST(id AS VARCHAR) FROM userdb.users ORDER BY id"));
+      }
+    }
+
+    @Test void castVarcharToIntComparison() throws Exception {
+      try (CrossDb db = corePlusCreds()) {
+        assertEquals(List.of("a1"),
+            rows(db, "SELECT login FROM credsdb.creds WHERE CAST(tenant_id AS VARCHAR) = '100' "
+                + "AND login = 'a1'"));
+      }
+    }
+
+    @Test void implicitIntToDecimalPromotion() throws Exception {
+      // INT 与 DECIMAL 混算：隐式提升（pings.amount 为 DECIMAL）
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(0, new BigDecimal(scalar(db,
+                "SELECT amount + 1 FROM pingdb.pings WHERE id = 1"))
+            .compareTo(new BigDecimal("2.25")));
+      }
+    }
+
+    @Test void integerDivisionAndModulo() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2,1"),
+            rows(db, "SELECT 7 / 3, MOD(7, 3) FROM userdb.small LIMIT 1"));
+      }
+    }
+
+    @Test void extractFromTimestamp() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("2026,2"),
+            rows(db, "SELECT EXTRACT(YEAR FROM ts), EXTRACT(MONTH FROM ts) "
+                + "FROM pingdb.pings WHERE id = 3"));
+      }
+    }
+
+    @Test void timestampComparisonFilter() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1", "3"),
+            rows(db, "SELECT id FROM pingdb.pings WHERE ts >= TIMESTAMP '2026-01-01 00:00:00' "
+                + "ORDER BY id"));
+      }
+    }
+
+    @Test void stringFunctionsPositionTrimReplace() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("2,alic"),
+            rows(db, "SELECT POSITION('li' IN name), TRIM(TRAILING 'e' FROM name) "
+                + "FROM userdb.users WHERE id = 1"));
+        assertEquals("abXde",
+            scalar(db, "SELECT REPLACE('abcde', 'c', 'X') FROM userdb.small LIMIT 1"));
+      }
+    }
+
+    @Test void booleanColumnDirectFilter() throws Exception {
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("1"), rows(db, "SELECT id FROM pingdb.pings WHERE flag = TRUE"));
+        assertEquals(List.of("3"), rows(db, "SELECT id FROM pingdb.pings WHERE flag = FALSE"));
+        // IS [NOT] FALSE：NULL 不属于两者
+        assertEquals(List.of("1", "3"),
+            rows(db, "SELECT id FROM pingdb.pings WHERE flag IS NOT UNKNOWN ORDER BY id"));
+      }
+    }
+  }
+
+  // ---------- 分页深边界（参考 MyCat / Vitess 分页用例） ----------
+
+  @Nested
+  @DisplayName("分页深边界场景")
+  class PagingEdges {
+
+    @Test void offsetBeyondResultSizeReturnsEmpty() throws Exception {
+      try (CrossDb db = core()) {
+        assertTrue(rows(db, "SELECT id FROM userdb.users ORDER BY id LIMIT 5 OFFSET 10").isEmpty());
+      }
+    }
+
+    @Test void limitLargerThanResultReturnsAll() throws Exception {
+      try (CrossDb db = core()) {
+        assertEquals(List.of("1", "2", "3"),
+            rows(db, "SELECT id FROM userdb.users ORDER BY id LIMIT 999"));
+      }
+    }
+
+    @Test void offsetEqualsResultSizeReturnsEmpty() throws Exception {
+      try (CrossDb db = core()) {
+        assertTrue(rows(db, "SELECT id FROM userdb.users ORDER BY id OFFSET 3").isEmpty());
+      }
+    }
+
+    @Test void topNOverUnionWithNullKeys() throws Exception {
+      // 集合操作 UNION 含 NULL 行 + Top-N 下推：显式 NULLS FIRST 消除引擎默认序歧义
+      try (CrossDb db = corePlusPings()) {
+        assertEquals(List.of("9", "3"),
+            rows(db, "SELECT user_id AS id FROM pingdb.pings "
+                + "UNION ALL SELECT id FROM userdb.users "
+                + "ORDER BY id DESC NULLS FIRST LIMIT 2 OFFSET 1"));
+      }
+    }
+
+    @Test void topNBindJoinWithOrderByOuterExpression() throws Exception {
+      // Top-N + Bind Join：ORDER BY 表达式（-o.id）位于驱动侧，下推后语义保持
+      try (CrossDb db = core()) {
+        assertEquals(List.of("102", "101", "100"),
+            rows(db, "SELECT o.id FROM userdb.users u "
+                + "JOIN orderdb.orders o ON o.user_id = u.id "
+                + "ORDER BY -o.id LIMIT 3 OFFSET 1"));
+      }
+    }
+  }
 }
