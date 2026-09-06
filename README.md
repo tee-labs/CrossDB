@@ -56,8 +56,9 @@ try (CrossDb db = new CrossDb()) {
 | 超时传播 | `queryTimeout` 传播到每条源库语句，慢查询由 JDBC 驱动在源库侧取消，防连接池耗尽 |
 | 级联取消 | `db.cancel()`（外部线程调用）遍历在途源库语句逐个 `Statement.cancel()`，主动掐断慢查询；语句关闭自动注销注册表 |
 | 只读硬化 | 仅放行查询语句（SELECT、UNION/INTERSECT/EXCEPT、ORDER BY/LIMIT 与 WITH CTE 包裹）；INSERT/UPDATE/DELETE/MERGE/DDL/SET 等在解析层直接拒绝——写入请直接操作各源库 |
-| safeMode | `db.safeMode()` 后，计划中出现「无过滤条件的源库全表拉取」直接抛 `CrossDbUnsafeQueryException`（Bind Join 内表例外，其必带 key IN 过滤；聚合视为有归约）——OLTP 零容忍全表拉取 |
+| safeMode | `db.safeMode()` 后，计划中出现「无过滤条件的源库全表拉取」直接抛 `CrossDbUnsafeQueryException`（Bind Join 内表例外，其必带 key IN 过滤；聚合视为有归约）——OLTP 零容忍全表拉取。FULL JOIN 的反连接 SQL 在运行期生成：外表零行/全 NULL key 时反连接将无过滤全表拉取内表，safeMode 会在执行期拒绝（见「Bind Join 当前边界」） |
 | explain / analyze | `explain(sql)` 返回优化后物理计划；`analyze(sql)` 执行并输出各源库实际下发的 SQL、每库网络行数、Bind Join 批次与拉取行数（注意：analyze 会消费整个结果集） |
+| ResultSet API | 结果集支持常用取值方法（`getInt/getLong/getByte/getShort/getFloat/getDouble/getString/getBoolean/getBigDecimal/getBytes/getTimestamp/getDate/getTime/getObject`，下标与列名两种重载）+ `wasNull()`（NULL 的数值取 0，由 `wasNull` 区分）+ `getMetaData()`（列数/名称/类型/精度/可空等基础元数据，供 Spring JdbcTemplate、MyBatis 等框架使用）；未支持的元数据方法显式抛「不支持」，不静默返回假值 |
 
 ## 典型场景与执行路径
 
@@ -125,12 +126,17 @@ CrossDbCustomizer crossDbCustomizer(DataSource shopDs) {
 
 满足以下全部条件才改写为 Bind Join，否则**自动退回 Calcite 原生计划**（回退是正确行为，不是缺陷）：
 
-- INNER/LEFT/RIGHT/FULL/SEMI/ANTI JOIN，连接条件**全部**为跨侧等值对（支持多列复合键），无残余非等值条件（有则退回原生计划）；RIGHT 交换内外侧执行，FULL 的反连接会把外表 distinct key 全量攒内存（受行数熔断封顶）；SEMI/ANTI 要求投影只引用外表列（去相关形态满足）；SEMI/ANTI 的改写还会校验过滤列可追溯到去相关器生成的**常量标记**，用户手写的 `LEFT JOIN + WHERE 右列 IS [NOT] NULL`（INNER/LEFT 语义）不会被误改写；
+- INNER/LEFT/RIGHT/FULL/SEMI/ANTI JOIN，连接条件**全部**为跨侧等值对（支持多列复合键），无残余非等值条件（有则退回原生计划）；RIGHT 交换内外侧执行，FULL 的反连接会把外表 distinct key 全量攒内存（受行数熔断封顶），且每块 NOT IN 均补 `key IS NULL` 保证内表 NULL key 的未匹配行不丢行（三值逻辑下 NULL 的 NOT IN 恒 UNKNOWN）；SEMI/ANTI 要求投影只引用外表列（去相关形态满足）；SEMI/ANTI 的改写还会校验过滤列可追溯到去相关器生成的**常量标记**，用户手写的 `LEFT JOIN + WHERE 右列 IS [NOT] NULL`（INNER/LEFT 语义）不会被误改写；
 - 内表可整体下推为一条 JDBC SQL（单输入算子链——Scan/Filter/Project/Sort/Aggregate——顶层为表扫描，且输出列名唯一）；
 - 存在至少一对等值连接 key（`NOT IN` 展开形态、跨库笛卡尔积无 key 可绑，一律回退原生计划）；
 - 左右两侧来自**不同**已注册库（同库 JOIN 走原生方言下推，不抢）；
 - key 经 JDBC `getObject/setObject` 传递，且两侧 key 列类型一致（类型不一致回退）；
 - 哈希淘汰仅在驱动侧按 key 有序时启用（检测保守，宁可不淘汰不错杀匹配）。
+
+safeMode 与 FULL JOIN 的补充边界：
+
+- safeMode 的计划期检查对 Bind Join 只看**驱动侧**子树（内表必带 key IN 过滤）；FULL 的反连接 SQL 在运行期生成，故当外表耗尽后可用 key 为空（外表零行或 key 全 NULL，反连接将无 WHERE 全表拉取内表）时，由执行器在**运行期**拒绝（`CrossDbUnsafeQueryException`，挂在 RuntimeException 的 cause 链上）；
+- 若优化器因代价比较选择原生 FULL JOIN 回退计划（两侧均为裸拉取），safeMode 会在计划期按「无过滤全表拉取」拦截——这与原生计划的语义一致，属预期防呆而非缺陷。
 
 其他下推的边界：
 
@@ -156,11 +162,11 @@ CrossDbCustomizer crossDbCustomizer(DataSource shopDs) {
 
 ## 单元测试覆盖
 
-53 个测试分四组：
+61 个测试分四组：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
-- `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片）；
-- `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝）；
+- `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
+- `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截（含 FULL 反连接退化拦截）、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝、schema 重名/空名拒绝、ResultSet 取值 API（typed getter / wasNull / 元数据））；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。

@@ -98,6 +98,12 @@ public class CrossDb implements AutoCloseable {
   }
 
   public CrossDb register(String schema, DataSource dataSource) throws SQLException {
+    if (schema == null || schema.isBlank()) {
+      throw new IllegalArgumentException("schema 名称不能为空");
+    }
+    if (sources.containsKey(schema)) {
+      throw new IllegalArgumentException("schema 重复注册: " + schema);
+    }
     DataSource guarded =
         Guarded.wrap(dataSource, fetchSize, rowLimit, schema, stats, queryTimeout);
     sources.put(schema, guarded);
@@ -114,6 +120,7 @@ public class CrossDb implements AutoCloseable {
     // Stats.ACTIVE 保留到结果集迭代结束（Bind Join 在迭代期执行）；
     // 同一 CrossDb 并发多条查询时统计会串场，CalciteConnection 本身也不支持并发。
     stats.reset();
+    stats.safeMode = safeMode;
     Stats.ACTIVE = stats;
     ResultSet rs = Exec.query(connection, best);
     return Guarded.limit(rs, rowLimit);
@@ -139,6 +146,7 @@ public class CrossDb implements AutoCloseable {
       checkSafe(best);
     }
     stats.reset();
+    stats.safeMode = safeMode;
     Stats.ACTIVE = stats;
     try (ResultSet rs = Guarded.limit(Exec.query(connection, best), rowLimit)) {
       while (rs.next()) {

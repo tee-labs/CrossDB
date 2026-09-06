@@ -13,6 +13,7 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -546,6 +547,124 @@ class CrossDbTest {
       assertThrows(SQLException.class, () -> db.query("SELEC 1"));
       assertThrows(SQLException.class,
           () -> db.query("SELECT * FROM nosuchdb.nosuchtable"));
+    }
+  }
+
+  @Test void fullJoinKeepsInnerNullKeyRows() throws Exception {
+    // FULL 反连接的补 OR key IS NULL 回归：内表 user_id=9 与 user_id=NULL 的行
+    // 都是无匹配行，三值逻辑下 NOT IN 会丢掉 NULL key 行，原生 FULL 语义不允许
+    List<String> pingSqls = Collections.synchronizedList(new ArrayList<>());
+    DataSource pings = Recording.dataSource(Fixtures.PINGS, pingSqls, new ArrayList<>());
+    try (CrossDb db = new CrossDb()) {
+      List<String> rows = new ArrayList<>();
+      try (ResultSet rs = db.register("userdb", Fixtures.USERS)
+          .register("pingdb", pings).query(
+          "SELECT u.name, p.id, p.user_id FROM userdb.users u FULL JOIN pingdb.pings p "
+          + "ON p.user_id = u.id "
+          + "ORDER BY COALESCE(p.id, 99), u.name NULLS LAST")) {
+        while (rs.next()) {
+          rows.add(rs.getString(1) + "," + rs.getObject(2) + "," + rs.getObject(3));
+        }
+      }
+      // alice 匹配 p1；p2(9) 与 p3(NULL) 反连接补出左侧 NULL；bob/carol 右侧补 NULL
+      assertEquals(List.of("alice,1,1", "null,2,9", "null,3,null", "bob,null,null",
+          "carol,null,null"), rows);
+      assertTrue(pingSqls.stream().anyMatch(s -> s.contains("IS NULL")),
+          "反连接 SQL 应带 key IS NULL: " + pingSqls);
+    }
+  }
+
+  @Test void resultSetTypedGettersWasNullAndMetadata() throws Exception {
+    try (CrossDb db = new CrossDb()) {
+      db.register("pingdb", Fixtures.PINGS);
+      try (ResultSet rs = db.query("SELECT id AS `ID`, user_id AS `USER_ID`, "
+          + "note AS `NOTE`, amount AS `AMOUNT`, ts AS `TS`, flag AS `FLAG` "
+          + "FROM pingdb.pings ORDER BY id")) {
+        java.sql.ResultSetMetaData md = rs.getMetaData();
+        assertEquals(6, md.getColumnCount());
+        assertEquals("ID", md.getColumnName(1));
+        assertEquals("USER_ID", md.getColumnLabel(2));
+        assertEquals(java.sql.Types.INTEGER, md.getColumnType(1));
+        assertEquals(java.sql.Types.VARCHAR, md.getColumnType(3));
+        assertEquals(java.sql.Types.DECIMAL, md.getColumnType(4));
+        assertEquals("TIMESTAMP", md.getColumnTypeName(5));
+        assertEquals(java.sql.Types.TIMESTAMP, md.getColumnType(5));
+        assertEquals(java.sql.Types.BOOLEAN, md.getColumnType(6));
+        // JDBC 契约：className 与 getObject 返回类型一致——Calcite 内部把 TIMESTAMP
+        // 承载为 epoch millis（Long），getObject 返回 Long，typed getter 负责转时间型
+        assertEquals("java.lang.Long", md.getColumnClassName(5));
+        assertTrue(rs.next());
+        assertEquals(1, rs.getInt("ID"));
+        assertFalse(rs.wasNull());
+        assertEquals("a", rs.getString("NOTE"));
+        assertEquals(new java.math.BigDecimal("1.25"), rs.getBigDecimal("AMOUNT"));
+        assertEquals(java.sql.Timestamp.valueOf("2026-01-02 03:04:05"), rs.getTimestamp("TS"));
+        assertEquals(java.sql.Date.valueOf("2026-01-02"), rs.getDate("TS"));
+        assertTrue(rs.getBoolean("FLAG"));
+        assertEquals(1.25, rs.getDouble("AMOUNT"), 0);
+        assertEquals(1L, rs.getLong("ID"));
+        assertEquals((short) 1, rs.getShort("ID"));
+        assertEquals((byte) 1, rs.getByte("ID"));
+
+        assertTrue(rs.next());
+        assertEquals(9, rs.getInt("USER_ID"));
+        assertFalse(rs.wasNull());
+        assertNull(rs.getBigDecimal("AMOUNT"));
+        assertTrue(rs.wasNull());
+        assertNull(rs.getTimestamp("TS"));
+        assertEquals(0.0, rs.getDouble("AMOUNT"), 0);
+        assertTrue(rs.wasNull());
+        assertFalse(rs.getBoolean("FLAG"));
+        assertTrue(rs.wasNull());
+
+        assertTrue(rs.next());
+        // 内表 NULL key 行：getInt 返回 0 且 wasNull 可区分（此前恒 false 且 NPE）
+        assertEquals(0, rs.getInt("USER_ID"));
+        assertTrue(rs.wasNull());
+        assertNull(rs.getString("NOTE"));
+        // DECIMAL(10,2) 定标返回 3.50，按数值比较
+        assertEquals(0, rs.getBigDecimal("AMOUNT").compareTo(new java.math.BigDecimal("3.5")));
+        assertEquals(java.sql.Timestamp.valueOf("2026-02-03 04:05:06"), rs.getTimestamp("TS"));
+        assertFalse(rs.getBoolean("FLAG"));
+        assertFalse(rs.wasNull());
+        assertFalse(rs.next());
+      }
+    }
+  }
+
+  @Test void safeModeRejectsDegenerateFullJoinAntiJoin() throws Exception {
+    // 外表过滤为空集 → 反连接 queued 为空 → 运行期将无 WHERE 全表拉取内表；
+    // safeMode 承诺零容忍全表拉取：Bind Join 计划在执行期拦截，原生回退计划
+    // （两侧裸拉取）在计划期拦截——两种路径根因都应是 CrossDbUnsafeQueryException
+    try (CrossDb db = new CrossDb().safeMode()) {
+      db.register("userdb", Fixtures.USERS).register("pingdb", Fixtures.PINGS);
+      try {
+        try (ResultSet rs = db.query(
+            "SELECT u.name, p.id FROM (SELECT id, name FROM userdb.users WHERE id = 999) u "
+            + "FULL JOIN pingdb.pings p ON p.user_id = u.id")) {
+          while (rs.next()) {
+            // 消费触发反连接
+          }
+        }
+        fail("外表零行时 FULL 反连接将全表拉取内表，safeMode 应拒绝");
+      } catch (Throwable e) {
+        Throwable root = e;
+        while (root.getCause() != null) {
+          root = root.getCause();
+        }
+        assertTrue(root instanceof CrossDbUnsafeQueryException,
+            "根因应是 safeMode 拦截: " + root);
+      }
+    }
+  }
+
+  @Test void registerRejectsBlankAndDuplicateSchema() throws Exception {
+    try (CrossDb db = new CrossDb()) {
+      assertThrows(IllegalArgumentException.class, () -> db.register(null, Fixtures.USERS));
+      assertThrows(IllegalArgumentException.class, () -> db.register(" ", Fixtures.USERS));
+      db.register("userdb", Fixtures.USERS);
+      assertThrows(IllegalArgumentException.class,
+          () -> db.register("userdb", Fixtures.ORDERS));
     }
   }
 }
