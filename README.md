@@ -162,12 +162,13 @@ safeMode 与 FULL JOIN 的补充边界：
 
 ## 单元测试覆盖
 
-  259 个测试分五组：
+  324 个测试分六组（其中 18 个以 `@Disabled("待支持/待修复: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
 - `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截（含 FULL 反连接退化拦截）、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝、schema 重名/空名拒绝、ResultSet 取值 API（typed getter / wasNull / 元数据））；
 - `CrossDbScenariosTest`：跨库 SQL 场景覆盖（参考 Calcite/Presto・Trino/ShardingSphere/Vitess 等同类系统用例设计）：JOIN 家族（三库链式、左右/全外连接、NULL key、同库混合、子查询内表、表达式键）、子查询（IN/EXISTS/NOT EXISTS 双方向、标量子查询、派生表）、聚合（无分组多列聚合、HAVING、COUNT DISTINCT、分组表达式、空集聚合）、集合操作（UNION/INTERSECT/EXCEPT、带标签列合并、三分支 Top-N）、排序分页（多列/别名/OFFSET/LIMIT 0）、CTE（过滤/聚合/嵌套）、表达式函数（CASE/字符串/数值/IS NULL/LIKE/BETWEEN）、边界形态（小批次拆分、safeMode 组合、引号标识符）、高级窗口（LAG/LEAD/FIRST_VALUE、PARTITION 分组窗口、组内 Top-N 派生表）、分组扩展（ROLLUP/CUBE/GROUPING SETS）、TPC-H 补充形态（Q5/Q17/Q18/Q8）、集合链（UNION-EXCEPT 链、NULL 成员集合操作、分片 UNION 回流 JOIN）、VALUES/APPLY（VALUES 表跨库 JOIN、CROSS/OUTER APPLY）、空集与标量子查询边界（空驱动侧、空 IN/NOT IN、零行标量、重复 key SEMI/ANTI）、表达式与分组补充（SIMILAR TO、TIMESTAMPDIFF、区间算术、NULL 分组、多列 COUNT DISTINCT）、APPLY/LATERAL 扩展（相关 COUNT/MAX、对输出列过滤、外层聚合、analyze 形态）、SEMI/ANTI 深组合（ANTI 后 GROUP BY、OR 回退、嵌套 EXISTS、SEMI 后 LEFT JOIN）、聚合扩展（多列 COUNT DISTINCT 分组/混用/双集合、AVG(DISTINCT)、位聚合、HAVING 比标量子查询）、集合操作扩展（EXCEPT ALL 多重集语义、三分支 INTERSECT、布尔 NULL 合并）、语法兼容（LENIENT：`!=`、`LIMIT start,count`、NOT SIMILAR TO、ESCAPE 子句、COALESCE join key）；
+- `CrossDbCompatibilityTest`：方言与特性兼容性覆盖（参考 PostgreSQL regress/Calcite/Trino/SQL Server/Oracle/MySQL 公开用例补充）：JOIN 扩展（USING/NATURAL、四库链、OR 条件回退、双侧聚合派生表、复合键 ANTI、IN 子查询含 UNION）、集合操作扩展（类型放宽合并、括号操作数、标准 OFFSET…FETCH、Oracle MINUS、分支内 LIMIT、CTE 含 UNION 双引用、EXCEPT-UNION 链）、窗口帧与排名（ROWS 帧三形态、NTILE、CUME_DIST/PERCENT_RANK 待支持、NTH_VALUE 帧语义待修复）、聚合扩展（FILTER 条件聚合、LISTAGG、VAR/STDDEV 精度待修复、SUM DISTINCT）、函数扩展（TRIM 变体、SUBSTRING FROM/FOR、OVERLAY/INITCAP/FLOOR…TO 下推待修复、CHR/LPAD/REPEAT/GREATEST/NVL/STRING_AGG/GROUP_CONCAT 待注册）、递归 CTE/PIVOT/GROUP BY 别名、错误契约（非法 CAST、除零、非分组列）、待修复清单均以 `@Disabled` 注明根因；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。
