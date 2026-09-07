@@ -27,6 +27,15 @@ public final class CrossDbFunctions {
 
   private CrossDbFunctions() {}
 
+  /** MySQL REGEXP/RLIKE：Java 正则在 value 内任意位置匹配（POSIX 方言近似）。
+   * 与 MySQL 默认 collation 不同，此处大小写敏感；任一侧 NULL 返回 NULL。 */
+  public static Boolean regexp(String value, String pattern) {
+    if (value == null || pattern == null) {
+      return null;
+    }
+    return java.util.regex.Pattern.compile(pattern).matcher(value).find();
+  }
+
   /** {@code x SIMILAR TO pattern}（默认转义符，与 Calcite 两参语义一致）。 */
   public static Boolean similar(String value, String pattern) {
     return value == null || pattern == null ? null : SIMILAR.similar(value, pattern);

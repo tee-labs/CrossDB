@@ -131,9 +131,22 @@ final class SqlRewrites {
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.ANY, SqlTypeFamily.ANY),
           SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
 
+  /** MySQL REGEXP/RLIKE：Java 正则任意位置匹配，本地求值（解析器仅认 RLIKE 关键字，
+   * REGEXP 由语句级预处理替换为 RLIKE 后挂载到此实现）。 */
+  private static final SqlUserDefinedFunction REGEXP_FN =
+      udf("CROSSDB_REGEXP", "regexp",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING), SqlTypeName.VARCHAR,
+          ReturnTypes.BOOLEAN_NULLABLE);
+
   private static final SqlUserDefinedAggFunction LISTAGG_DISTINCT_FN =
       aggFn("CROSSDB_LISTAGG", VARCHAR_NULLABLE,
           List.of(SqlTypeFamily.ANY, SqlTypeFamily.STRING), CrossDbAggregates.ListaggDistinct.class);
+  private static final SqlUserDefinedAggFunction BOOL_AND_FN =
+      aggFn("CROSSDB_BOOL_AND", ReturnTypes.BOOLEAN_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.BoolAnd.class);
+  private static final SqlUserDefinedAggFunction BOOL_OR_FN =
+      aggFn("CROSSDB_BOOL_OR", ReturnTypes.BOOLEAN_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.BoolOr.class);
   private static final SqlUserDefinedAggFunction MEDIAN_FN =
       aggFn("CROSSDB_MEDIAN", ReturnTypes.DOUBLE_NULLABLE,
           List.of(SqlTypeFamily.ANY), CrossDbAggregates.Median.class);
@@ -153,7 +166,7 @@ final class SqlRewrites {
   /** 注册进引擎操作符表的本地 UDAF（名字 SQL 不可见，仅由解析期改写挂载）。 */
   private static final List<org.apache.calcite.sql.SqlOperator> AGGS = List.of(
       LISTAGG_DISTINCT_FN, MEDIAN_FN, PERCENTILE_CONT_FN,
-      NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN);
+      NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN, BOOL_AND_FN, BOOL_OR_FN);
 
   private static SqlUserDefinedAggFunction aggFn(String name, SqlReturnTypeInference ret,
       List<SqlTypeFamily> fams, Class<?> impl) {
@@ -192,7 +205,7 @@ final class SqlRewrites {
       udf("IFNULL", "ifnull", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
           SqlTypeName.ANY, ARG0_NULLABLE),
       FLOOR_UNIT_FN, CEIL_UNIT_FN, OVERLAY_FN_3, OVERLAY_FN_4, INITCAP_FN,
-      SIMILAR_FN_2, SIMILAR_FN_3,
+      SIMILAR_FN_2, SIMILAR_FN_3, REGEXP_FN,
       GREATEST2, GREATEST3, GREATEST4, LEAST2, LEAST3, LEAST4,
       TIMESTAMPDIFF_FN);
   /** 全部本地操作符（标量 UDF + 聚合/窗口 UDAF）：注册进引擎操作符表。 */
@@ -249,6 +262,7 @@ final class SqlRewrites {
       case "floorUnit", "ceilUnit" -> new Class<?>[]{Object.class, String.class};
       case "nvl", "ifnull" -> new Class<?>[]{Object.class, Object.class};
       case "timestampDiff" -> new Class<?>[]{String.class, Object.class, Object.class};
+      case "regexp" -> new Class<?>[]{String.class, String.class};
       case "concat2" -> new Class<?>[]{String.class, String.class};
       case "concat3" -> new Class<?>[]{String.class, String.class, String.class};
       case "concatWs2" -> new Class<?>[]{String.class, Object.class, Object.class};
@@ -303,13 +317,75 @@ final class SqlRewrites {
       "INTERSECT", "EXCEPT", "JOIN", "LEFT", "RIGHT", "INNER", "CROSS", "FULL",
       "OUTER", "NATURAL", "ON", "APPLY");
 
-  /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES。
-   * 各改写仅在能安全识别边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
+  /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES /
+   * LISTAGG ON OVERFLOW ERROR / REGEXP。各改写仅在能安全识别边界时生效，
+   * 否则原样返回交由解析器/校验器报真实错误。 */
   static String preprocess(String sql) {
     sql = preprocessTop(sql);
     sql = preprocessSemiAntiJoin(sql);
     sql = preprocessFetchWithTies(sql);
+    sql = preprocessListaggOverflowError(sql);
+    sql = preprocessRegexp(sql);
     return sql;
+  }
+
+  private static final Pattern LISTAGG_OVERFLOW_ERROR =
+      Pattern.compile("(?i)\\bON\\s+OVERFLOW\\s+ERROR\\b");
+
+  /** LISTAGG 的 {@code ON OVERFLOW ERROR} 子句（Calcite 解析器不支持该语法）→ 剥离。
+   * 标准默认行为即 ON OVERFLOW ERROR，语义不变；TRUNCATE 形态无法等价剥除，
+   * 不在此处理，交由解析器报真实错误。 */
+  private static String preprocessListaggOverflowError(String sql) {
+    return stripLiveMatches(sql, LISTAGG_OVERFLOW_ERROR);
+  }
+
+  private static final Pattern REGEXP_OPERATOR = Pattern.compile("(?i)\\bREGEXP\\b");
+
+  /** MySQL {@code REGEXP} 操作符（Calcite 解析器仅支持同义关键字 RLIKE）→ RLIKE，
+   * 随后由解析树改写挂载到本地 CROSSDB_REGEXP。NOT REGEXP 同步生效（NOT RLIKE 合法）。 */
+  private static String preprocessRegexp(String sql) {
+    Matcher m = REGEXP_OPERATOR.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    boolean[] live = liveMask(sql);
+    StringBuilder out = new StringBuilder(sql.length());
+    int pos = 0;
+    m.reset();
+    while (m.find()) {
+      if (!spanLive(live, m.start(), m.end())) {
+        continue;   // 字面量/注释内的伪命中
+      }
+      out.append(sql, pos, m.start()).append("RLIKE");
+      pos = m.end();
+    }
+    if (pos == 0) {
+      return sql;
+    }
+    return out.append(sql.substring(pos)).toString();
+  }
+
+  /** 剥离 sql 中所有「活字符」区间的正则命中（字面量/注释内不动）。 */
+  private static String stripLiveMatches(String sql, Pattern pattern) {
+    Matcher m = pattern.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    boolean[] live = liveMask(sql);
+    StringBuilder out = new StringBuilder(sql.length());
+    int pos = 0;
+    m.reset();
+    while (m.find()) {
+      if (!spanLive(live, m.start(), m.end())) {
+        continue;
+      }
+      out.append(sql, pos, m.start());
+      pos = m.end();
+    }
+    if (pos == 0) {
+      return sql;
+    }
+    return out.append(sql.substring(pos)).toString();
   }
 
   /** 语句级 TOP n 改写为末尾 FETCH FIRST n ROWS ONLY（语义：有 ORDER BY 取前 n 行、
@@ -684,6 +760,9 @@ final class SqlRewrites {
         }
         String name = call.getOperator().getName();
         String upper = name.toUpperCase();
+        if (upper.equals("RLIKE") || upper.equals("NOT RLIKE")) {
+          return rewriteRlike(call);
+        }
         if (call.getKind() == SqlKind.TIMESTAMP_DIFF || upper.equals("TIMESTAMPDIFF")) {
           return rewriteTimestampDiff(call);
         }
@@ -712,6 +791,10 @@ final class SqlRewrites {
         }
         if (call.getKind() == SqlKind.OTHER_FUNCTION) {
           return switch (upper) {
+            case "BOOL_AND", "EVERY" -> new SqlBasicCall(BOOL_AND_FN, call.getOperandList(),
+                call.getParserPosition());
+            case "BOOL_OR" -> new SqlBasicCall(BOOL_OR_FN, call.getOperandList(),
+                call.getParserPosition());
             case "INITCAP" -> new SqlBasicCall(INITCAP_FN, call.getOperandList(),
                 call.getParserPosition());
             case "OVERLAY" -> {
@@ -746,12 +829,73 @@ final class SqlRewrites {
           }
           return call;
         }
+        if (switch (call.getKind()) {
+          case LESS_THAN, LESS_THAN_OR_EQUAL, GREATER_THAN, GREATER_THAN_OR_EQUAL -> true;
+          default -> false;
+        }) {
+          // 行构造器不等比较：Enumerable 运行时不实现 ROW 类型排序比较，
+          // 展开为字典序等价的标量比较组合
+          return rewriteRowComparison(call);
+        }
         if (call.getKind() == SqlKind.OVER) {
           return rewriteOver(call);
         }
         return call;
       }
     };
+  }
+
+  /** {@code a RLIKE / NOT RLIKE pattern}（校验器未注册的 SqlLikeOperator）→
+   * {@code CROSSDB_REGEXP(a, pattern)} 本地求值；转义子句形态不支持，保留原样。 */
+  private static SqlNode rewriteRlike(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlBasicCall regexp = new SqlBasicCall(REGEXP_FN, ops, pos);
+    return call.getOperator().getName().equalsIgnoreCase("NOT RLIKE")
+        ? new SqlBasicCall(SqlStdOperatorTable.NOT, List.of(regexp), pos)
+        : regexp;
+  }
+
+  /** 行构造器不等比较（Enumerable 运行时不实现 ROW 类型排序比较）→ 按标准 SQL
+   * 行值比较的展开定义改写为标量比较组合：
+   * {@code (a1..an) OP (b1..bn) ≡ OR_i ( AND_{j<i} a_j = b_j AND a_i OP b_i )}
+   * （NULL 三值逻辑与展开定义一致）。任一侧非行构造器、字段数不符或为空时保留原样。 */
+  private static SqlNode rewriteRowComparison(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2 || !isRowCall(ops.get(0)) || !isRowCall(ops.get(1))) {
+      return call;
+    }
+    List<SqlNode> left = ((SqlCall) ops.get(0)).getOperandList();
+    List<SqlNode> right = ((SqlCall) ops.get(1)).getOperandList();
+    if (left.size() != right.size() || left.isEmpty()) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    org.apache.calcite.sql.SqlOperator cmpOp = switch (call.getKind()) {
+      case LESS_THAN -> SqlStdOperatorTable.LESS_THAN;
+      case LESS_THAN_OR_EQUAL -> SqlStdOperatorTable.LESS_THAN_OR_EQUAL;
+      case GREATER_THAN -> SqlStdOperatorTable.GREATER_THAN;
+      default -> SqlStdOperatorTable.GREATER_THAN_OR_EQUAL;
+    };
+    SqlNode out = null;
+    for (int i = 0; i < left.size(); i++) {
+      SqlNode term = new SqlBasicCall(cmpOp, List.of(left.get(i), right.get(i)), pos);
+      for (int j = i - 1; j >= 0; j--) {
+        term = new SqlBasicCall(SqlStdOperatorTable.AND, List.of(
+            new SqlBasicCall(SqlStdOperatorTable.EQUALS,
+                List.of(left.get(j), right.get(j)), pos), term), pos);
+      }
+      out = out == null ? term
+          : new SqlBasicCall(SqlStdOperatorTable.OR, List.of(out, term), pos);
+    }
+    return out;
+  }
+
+  private static boolean isRowCall(SqlNode node) {
+    return node instanceof SqlCall c && c.getKind() == SqlKind.ROW;
   }
 
   /** STRING_AGG(x[, sep][, ORDER BY ..]) / GROUP_CONCAT(x[, ORDER BY ..][, SEPARATOR sep])

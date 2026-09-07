@@ -704,10 +704,7 @@ class CrossDbComprehensiveTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: UNION DISTINCT + ORDER BY/OFFSET/FETCH 归并结果不全"
-        + "（分支 Top-N 下推截断先于去重，creds 分支 [1,2,1,3] 截 3 行丢失去重后第 3 组），待修复")
-    void offsetFetchAfterUnionDistinct() throws Exception {
+    @Test void offsetFetchAfterUnionDistinct() throws Exception {
       try (CrossDb db = all()) {
         assertEquals(List.of("2", "3"),
             rows(db, "SELECT id FROM userdb.small UNION SELECT user_id FROM credsdb.creds "
@@ -1169,10 +1166,7 @@ class CrossDbComprehensiveTest {
   @DisplayName("结构构造补充场景")
   class ConstructMore {
 
-    @Test
-    @Disabled("待支持: 行构造器不等比较（<、>）Enumerable 运行时不实现"
-        + "（等值比较已支持），待修复")
-    void rowConstructorInequalityComparison() throws Exception {
+    @Test void rowConstructorInequalityComparison() throws Exception {
       // 行值字典序比较：(o.id, u.id) < (102, 2) 命中 100/101/102
       try (CrossDb db = core()) {
         assertEquals(List.of("alice", "bob", "alice"),
@@ -1213,9 +1207,7 @@ class CrossDbComprehensiveTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: BOOL_AND/BOOL_OR 未注册（可经本地 UDAF 实现），待支持")
-    void boolAndBoolOrAggregates() throws Exception {
+    @Test void boolAndBoolOrAggregates() throws Exception {
       // PostgreSQL 布尔聚合：active {TRUE,FALSE,TRUE,NULL} → AND=false、OR=true
       try (CrossDb db = coreGoods()) {
         assertEquals(List.of("false,true"), rows(db,
@@ -1223,9 +1215,7 @@ class CrossDbComprehensiveTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: 解析器不支持 MySQL REGEXP 操作符（可经 CROSSDB_SIMILAR 等价改写），待支持")
-    void regexpMatchOperator() throws Exception {
+    @Test void regexpMatchOperator() throws Exception {
       // MySQL REGEXP 操作符
       try (CrossDb db = core()) {
         assertEquals(List.of("alice"),
@@ -1233,9 +1223,7 @@ class CrossDbComprehensiveTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: 解析器不支持 LISTAGG ON OVERFLOW 语法，待支持")
-    void listaggWithOverflowClause() throws Exception {
+    @Test void listaggWithOverflowClause() throws Exception {
       // 标准 LISTAGG ON OVERFLOW 子句
       try (CrossDb db = core()) {
         assertEquals("alice,bob,carol", scalar(db,
@@ -1245,7 +1233,9 @@ class CrossDbComprehensiveTest {
     }
 
     @Test
-    @Disabled("待支持: MATCH_RECOGNIZE 模式量词（B+ 等）Enumerable 运行时不实现，待支持")
+    @Disabled("待支持: 上游 Calcite EnumerableMatch 未完成运行时翻译——DEFINE 中的"
+        + " LAST(col, n) 无法编译（cannot translate call LAST），PATTERN 量词（B+ 等）"
+        + "亦未实现；需自研行模式识别物理算子，待支持")
     void matchRecognizePatternDetection() throws Exception {
       // SQL:2011 MATCH_RECOGNIZE：相邻日志分级连续变化序列
       try (CrossDb db = all()) {

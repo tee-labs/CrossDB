@@ -1,6 +1,7 @@
 package com.example.crossdb;
 
 import org.apache.calcite.adapter.enumerable.EnumerableConvention;
+import org.apache.calcite.adapter.enumerable.EnumerableRules;
 import org.apache.calcite.adapter.jdbc.JdbcSchema;
 import org.apache.calcite.adapter.jdbc.JdbcTableScan;
 import org.apache.calcite.adapter.jdbc.JdbcToEnumerableConverter;
@@ -38,6 +39,7 @@ import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.ResultSet;
 import java.sql.SQLException;
+import java.util.ArrayList;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
@@ -347,6 +349,10 @@ public class CrossDb implements AutoCloseable {
       planner.addRule(anti);
       planner.addRule(antiFilter);
       planner.addRule(shardTopN);
+      // 剔除上游缺陷规则 EnumerableMergeUnionRule：它对 UNION DISTINCT 也把
+      // (offset+fetch) 的 LIMIT 压进每个分支——去重发生在合并层，分支先截断会丢失
+      // 应保留的行。跨库 UNION ALL 的 Top-N 下推由 ShardTopNRule 安全承担。
+      planner.removeRule(EnumerableRules.ENUMERABLE_MERGE_UNION_RULE);
       return standard.run(planner, rel, requiredTraits, materializations, lattices);
     };
     return Programs.sequence(expandDistinct, withCustomRules);

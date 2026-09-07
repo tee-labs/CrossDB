@@ -225,6 +225,80 @@ public final class CrossDbAggregates {
     }
   }
 
+  // ---------- BOOL_AND(x) / BOOL_OR(x)（PostgreSQL 三值布尔聚合） ----------
+
+  /** 布尔聚合状态：是否见过非 NULL 值、TRUE、FALSE。 */
+  public static final class BoolState {
+    boolean seen;
+    boolean sawTrue;
+    boolean sawFalse;
+  }
+
+  /** CROSSDB_BOOL_AND：全 TRUE 才 TRUE，见 FALSE 即 FALSE；空集（全 NULL）返回 NULL。
+   * {@code EVERY} 为其同义别名（改写层归一）。 */
+  public static final class BoolAnd {
+    private BoolAnd() {}
+
+    public static BoolState init() {
+      return new BoolState();
+    }
+
+    public static BoolState add(BoolState s, Object v) {
+      if (v != null) {
+        s.seen = true;
+        if (Boolean.TRUE.equals(v)) {
+          s.sawTrue = true;
+        } else {
+          s.sawFalse = true;
+        }
+      }
+      return s;
+    }
+
+    public static BoolState merge(BoolState a, BoolState b) {
+      a.seen |= b.seen;
+      a.sawTrue |= b.sawTrue;
+      a.sawFalse |= b.sawFalse;
+      return a;
+    }
+
+    public static Boolean result(BoolState s) {
+      return s.seen ? !s.sawFalse : null;
+    }
+  }
+
+  /** CROSSDB_BOOL_OR：见 TRUE 即 TRUE，全 FALSE 才 FALSE；空集（全 NULL）返回 NULL。 */
+  public static final class BoolOr {
+    private BoolOr() {}
+
+    public static BoolState init() {
+      return new BoolState();
+    }
+
+    public static BoolState add(BoolState s, Object v) {
+      if (v != null) {
+        s.seen = true;
+        if (Boolean.TRUE.equals(v)) {
+          s.sawTrue = true;
+        } else {
+          s.sawFalse = true;
+        }
+      }
+      return s;
+    }
+
+    public static BoolState merge(BoolState a, BoolState b) {
+      a.seen |= b.seen;
+      a.sawTrue |= b.sawTrue;
+      a.sawFalse |= b.sawFalse;
+      return a;
+    }
+
+    public static Boolean result(BoolState s) {
+      return s.seen ? s.sawTrue : null;
+    }
+  }
+
   // ---------- TIMESTAMPDIFF(unit, a, b)（标量） ----------
 
   /** 完整单位数差值（MySQL 语义）：SEC/MIN/HOUR/DAY/WEEK 按时间长度整除；
