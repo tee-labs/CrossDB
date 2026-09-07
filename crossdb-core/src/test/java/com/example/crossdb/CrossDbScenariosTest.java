@@ -505,9 +505,11 @@ class CrossDbScenariosTest {
     }
 
     @Test void unionAllWithTagColumn() throws Exception {
+      // Calcite 1.42 起 UNION 两个定长 CHAR 字面量按 SQL 标准归一到 CHAR(5)，
+      // 'user' 填充为 'user '（与 Oracle 一致；1.38 上无填充）
       try (CrossDb db = core()) {
         assertEquals(List.of("100,order", "101,order", "102,order", "103,order",
-                "1,user", "2,user", "3,user"),
+                "1,user ", "2,user ", "3,user "),
             rows(db, "SELECT id, 'order' AS src FROM orderdb.orders "
                 + "UNION ALL SELECT id, 'user' FROM userdb.users ORDER BY src, id"));
       }
@@ -1703,9 +1705,11 @@ class CrossDbScenariosTest {
   class ApplyAndLateral {
 
     @Test void crossApplyCorrelatedCount() throws Exception {
-      // 相关 COUNT：alice/orders 2 行、bob 2 行，carol 无订单不出现（内连接语义）
+      // 相关 COUNT：alice/orders 2 行、bob 2 行；carol 无订单，但裸聚合（无 GROUP BY）空集
+      // 仍返回一行 0，因此 carol,0 保留——与 SQL Server / PostgreSQL 实际语义一致
+      // （Calcite 1.42 起 CALCITE-7031 通用去相关对齐了该行为，1.38 的「整行丢弃」是 Calcite 特有）
       try (CrossDb db = core()) {
-        assertEquals(List.of("alice,2", "bob,2"),
+        assertEquals(List.of("alice,2", "bob,2", "carol,0"),
             rows(db, "SELECT u.name, d.n FROM userdb.users u "
                 + "CROSS APPLY (SELECT COUNT(*) AS n FROM orderdb.orders o "
                 + "WHERE o.user_id = u.id) d ORDER BY u.name"));
@@ -1733,9 +1737,9 @@ class CrossDbScenariosTest {
     }
 
     @Test void crossApplyThenOuterAggregate() throws Exception {
-      // APPLY 输出再聚合：alice/bob 相关计数均为 2，GROUP BY 计数得 2 组
+      // APPLY 输出再聚合：alice/bob 相关计数均为 2、carol 为 0（空集聚合语义），GROUP BY 计数得 2 组
       try (CrossDb db = core()) {
-        assertEquals(List.of("2,2"),
+        assertEquals(List.of("0,1", "2,2"),
             rows(db, "SELECT d.n, COUNT(*) FROM userdb.users u "
                 + "CROSS APPLY (SELECT COUNT(*) AS n FROM orderdb.orders o "
                 + "WHERE o.user_id = u.id) d GROUP BY d.n"));
@@ -1752,9 +1756,9 @@ class CrossDbScenariosTest {
     }
 
     @Test void lateralJoinCorrelatedCount() throws Exception {
-      // LATERAL 等价 CROSS APPLY ON TRUE 形态
+      // LATERAL 等价 CROSS APPLY ON TRUE 形态；carol 裸聚合空集返回 0（见 crossApplyCorrelatedCount）
       try (CrossDb db = core()) {
-        assertEquals(List.of("alice,2", "bob,2"),
+        assertEquals(List.of("alice,2", "bob,2", "carol,0"),
             rows(db, "SELECT u.name, d.n FROM userdb.users u JOIN LATERAL "
                 + "(SELECT COUNT(*) AS n FROM orderdb.orders o WHERE o.user_id = u.id) d "
                 + "ON TRUE ORDER BY u.name"));
