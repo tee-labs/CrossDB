@@ -177,7 +177,7 @@ public class CrossDb implements AutoCloseable {
         // 操作符表：标准表 + 本地 UDF（方言兼容函数与 SIMILAR TO 改写目标）
         .operatorTable(SqlOperatorTables.chain(
             org.apache.calcite.sql.fun.SqlStdOperatorTable.instance(),
-            SqlOperatorTables.of(SqlRewrites.UDFS)))
+            SqlOperatorTables.of(SqlRewrites.OPERATORS)))
         .parserConfig(SqlParser.config().withLex(Lex.MYSQL)
             // LENIENT：放行 CROSS/OUTER APPLY（SQL Server 风格相关派生表）；
             // 对既有语法仅为放宽（!= / LIMIT a,b 等在 LENIENT 下同样可用）
@@ -194,8 +194,16 @@ public class CrossDb implements AutoCloseable {
       checkReadOnly(parsed);
       SqlNode validated = planner.validate(parsed);
       RelRoot root = planner.rel(validated);
-      best = planner.transform(0,
-          root.rel.getTraitSet().replace(EnumerableConvention.INSTANCE), root.rel);
+      // 校验器会给「列名清单派生表」等形态附加复合排序特征（RelCompositeTrait，
+      // 非简单特征），VolcanoPlanner.changeTraits 的 allSimple() 断言会拒绝；
+      // 顶层行序由计划内 Sort 算子保证，这里安全地退回空排序。
+      org.apache.calcite.plan.RelTraitSet required =
+          root.rel.getTraitSet().replace(EnumerableConvention.INSTANCE);
+      if (!required.allSimple()) {
+        required = required.replace(
+            org.apache.calcite.rel.RelCollations.EMPTY);
+      }
+      best = planner.transform(0, required, root.rel);
       // 优化后行型可能宽于验证后的输出行型（如 ORDER BY 引用未 SELECT 的列/表达式键，
       // 排序列会留在计划输出里），按 root.fields 补最终投影裁掉，避免输出列泄漏
       final RelNode optimized = best;

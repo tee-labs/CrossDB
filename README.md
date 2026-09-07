@@ -20,9 +20,10 @@
 ## 快速开始
 
 ```bash
-mvn test                                                     # 259 个 JUnit 单元测试（两个模块）
+mvn test                                                     # 441 个 JUnit 单元测试（两个模块；4 个 @Disabled("待支持: …") 兼容性用例按设计跳过）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
 # 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
+# 非 UTC 时区的机器请加 -DargLine="-Duser.timezone=UTC"（TIMESTAMP 按 UTC 墙钟承载）
 ```
 
 第一个跨库查询（H2 内存库演示，真实库见下）：
@@ -162,13 +163,15 @@ safeMode 与 FULL JOIN 的补充边界：
 
 ## 单元测试覆盖
 
-  324 个测试分六组（其中 18 个以 `@Disabled("待支持/待修复: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
+  441 个测试分七组（其中 4 个以 `@Disabled("待支持: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
 - `CrossDbTest`：端到端（JOIN+GROUP BY、WHERE/LIMIT 回归、LEFT/RIGHT/FULL 的 IN 下推、EXISTS 半连接 IN 下推、NOT EXISTS ANTI 下推、NOT IN/笛卡尔回退、复合键跨库、Top-N 下推、分片 UNION ALL Top-N（含 OFFSET）与无 Top-N 熔断、传递谓词下推、只读硬化（DML 拒绝 / CTE 放行）、safeMode 拦截（含 FULL 反连接退化拦截）、超时传播、级联取消、explain/analyze、行数熔断、非法配置/SQL 拒绝、schema 重名/空名拒绝、ResultSet 取值 API（typed getter / wasNull / 元数据））；
 - `CrossDbScenariosTest`：跨库 SQL 场景覆盖（参考 Calcite/Presto・Trino/ShardingSphere/Vitess 等同类系统用例设计）：JOIN 家族（三库链式、左右/全外连接、NULL key、同库混合、子查询内表、表达式键）、子查询（IN/EXISTS/NOT EXISTS 双方向、标量子查询、派生表）、聚合（无分组多列聚合、HAVING、COUNT DISTINCT、分组表达式、空集聚合）、集合操作（UNION/INTERSECT/EXCEPT、带标签列合并、三分支 Top-N）、排序分页（多列/别名/OFFSET/LIMIT 0）、CTE（过滤/聚合/嵌套）、表达式函数（CASE/字符串/数值/IS NULL/LIKE/BETWEEN）、边界形态（小批次拆分、safeMode 组合、引号标识符）、高级窗口（LAG/LEAD/FIRST_VALUE、PARTITION 分组窗口、组内 Top-N 派生表）、分组扩展（ROLLUP/CUBE/GROUPING SETS）、TPC-H 补充形态（Q5/Q17/Q18/Q8）、集合链（UNION-EXCEPT 链、NULL 成员集合操作、分片 UNION 回流 JOIN）、VALUES/APPLY（VALUES 表跨库 JOIN、CROSS/OUTER APPLY）、空集与标量子查询边界（空驱动侧、空 IN/NOT IN、零行标量、重复 key SEMI/ANTI）、表达式与分组补充（SIMILAR TO、TIMESTAMPDIFF、区间算术、NULL 分组、多列 COUNT DISTINCT）、APPLY/LATERAL 扩展（相关 COUNT/MAX、对输出列过滤、外层聚合、analyze 形态）、SEMI/ANTI 深组合（ANTI 后 GROUP BY、OR 回退、嵌套 EXISTS、SEMI 后 LEFT JOIN）、聚合扩展（多列 COUNT DISTINCT 分组/混用/双集合、AVG(DISTINCT)、位聚合、HAVING 比标量子查询）、集合操作扩展（EXCEPT ALL 多重集语义、三分支 INTERSECT、布尔 NULL 合并）、语法兼容（LENIENT：`!=`、`LIMIT start,count`、NOT SIMILAR TO、ESCAPE 子句、COALESCE join key）；
-- `CrossDbCompatibilityTest`：方言与特性兼容性覆盖（参考 PostgreSQL regress/Calcite/Trino/SQL Server/Oracle/MySQL 公开用例补充）：JOIN 扩展（USING/NATURAL、四库链、OR 条件回退、双侧聚合派生表、复合键 ANTI、IN 子查询含 UNION）、集合操作扩展（类型放宽合并、括号操作数、标准 OFFSET…FETCH、Oracle MINUS、分支内 LIMIT、CTE 含 UNION 双引用、EXCEPT-UNION 链）、窗口帧与排名（ROWS 帧三形态、NTILE、CUME_DIST/PERCENT_RANK 待支持、NTH_VALUE 帧语义待修复）、聚合扩展（FILTER 条件聚合、LISTAGG、VAR/STDDEV 精度待修复、SUM DISTINCT）、函数扩展（TRIM 变体、SUBSTRING FROM/FOR、OVERLAY/INITCAP/FLOOR…TO 下推待修复、CHR/LPAD/REPEAT/GREATEST/NVL/STRING_AGG/GROUP_CONCAT 待注册）、递归 CTE/PIVOT/GROUP BY 别名、错误契约（非法 CAST、除零、非分组列）、待修复清单均以 `@Disabled` 注明根因；
+- `CrossDbCompatibilityTest`：方言与特性兼容性覆盖（参考 PostgreSQL regress/Calcite/Trino/SQL Server/Oracle/MySQL 公开用例补充）：JOIN 扩展（USING/NATURAL、四库链、OR 条件回退、双侧聚合派生表、复合键 ANTI、IN 子查询含 UNION）、集合操作扩展（类型放宽合并、括号操作数、标准 OFFSET…FETCH、Oracle MINUS、分支内 LIMIT、CTE 含 UNION 双引用、EXCEPT-UNION 链）、窗口帧与排名（ROWS 帧三形态、NTILE、CUME_DIST/PERCENT_RANK 等价改写、NTH_VALUE 帧内语义本地实现）、聚合扩展（FILTER 条件聚合、LISTAGG、VAR/STDDEV、SUM DISTINCT）、函数扩展（TRIM 变体、SUBSTRING FROM/FOR、OVERLAY/INITCAP/FLOOR…TO 本地改写、CHR/LPAD/REPEAT/GREATEST/NVL/STRING_AGG/GROUP_CONCAT）、递归 CTE（EnumerableRepeatUnion 落地）/PIVOT/GROUP BY 别名、错误契约（非法 CAST、除零、非分组列）；
+- `CrossDbExtensionsTest`：扩展场景覆盖（PostgreSQL LATERAL / SQL Server APPLY / 标准 VALUES / MySQL CONCAT 族 / Oracle MEDIAN·LISTAGG 等）：横向引用与表构造器（VALUES 派生表、LATERAL、CROSS/OUTER APPLY、UNNEST）、集合操作与分页扩展（EXCEPT/INTERSECT ALL、MySQL LIMIT a,b、ORDER BY 序数）、函数扩展（CONCAT_WS、REVERSE、CEIL(ts TO unit)、滑动帧窗口、DENSE_RANK）、聚合扩展（多列 COUNT DISTINCT、GROUPING+ROLLUP、PIVOT、LISTAGG DISTINCT、MEDIAN、PERCENTILE_CONT 本地实现）、跨库组合（CTE+HAVING、三层嵌套派生表、NOT IN 空子查询、COALESCE join key）、错误契约（歧义列、自连接裸引用）；
+- `CrossDbCoverageTest`：全量场景补充覆盖（与上述用例互补，参考 PostgreSQL regress / Calcite / Trino / MySQL 8.0 / SQL Server / Oracle 公开用例）：投影与 DISTINCT（多列去重、t.* 混用、无 AS 别名）、JOIN 补充（残余非等值 LEFT JOIN、DISTINCT/LIMIT 内表派生表、复合键 SEMI、裸 CROSS JOIN、三库链、RIGHT JOIN 派生表）、子查询补充（行值 IN、多列行构造器、<> ALL、< ANY、IN+GROUP BY+HAVING、CASE 内标量子查询、NOT EXISTS NULL 语义）、聚合补充（CASE 分组键、HAVING 未选聚合、TIMESTAMP 聚合承载约定、DECIMAL AVG/SUM、COUNT DISTINCT 跳 NULL、GROUP BY 序数）、窗口补充（WINDOW 命名子句、RANGE 帧 peers、LEAD/LAG 偏移与默认值、NTH_VALUE 分区帧、空集窗口、排名派生表 Top-1）、集合补充（INTERSECT 优先级、恒假分支、三分支类型放宽、多列 UNION 去重、VALUES∪表）、VALUES 行构造器（多列+WHERE、标量表达式、行等值比较）、排序分页（LIMIT ALL、ASC 默认 NULLS LAST、分片 Top-N 升序/跨分支并列键）、表达式补充（简单 CASE、ROUND/TRUNCATE/LN/EXP、MOD 符号、|| 数值、EXTRACT DAY/EPOCH、CAST TIMESTAMP→VARCHAR、ts-INTERVAL 承载、DATE 与 TIMESTAMP 比较、CHAR 定标拼接）、NULL 三值逻辑（BETWEEN/NOT BETWEEN/LIKE 对 NULL）、递归 CTE（真实表游走、UNION 去重终止、跨库种子、输出 Top-N）、只读硬化（UPDATE/DELETE/INSERT/CREATE/DROP/ALTER/GRANT/SET/MERGE/TRUNCATE 全拒绝、explain/analyze 同拒）、safeMode（聚合归约放行、裸排序拦截、Bind Join 双侧过滤放行、聚合转置裸拉取拦截）、explain/analyze 与 ResultSet 边界（列名缺失提示、next 前取值、getBytes 类型拒收）；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。

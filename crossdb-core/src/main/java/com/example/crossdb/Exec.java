@@ -44,11 +44,14 @@ final class Exec {
 
   static ResultSet query(CalciteConnection connection, RelNode plan) throws SQLException {
     RelNode rel = unwrap(plan);
-    Bindable bindable = EnumerableInterpretable.toBindable(new HashMap<>(), spark(),
+    // params 承接计划生成期暂存的对象（如递归 CTE 的 TransientTable）：生成的代码
+    // 在 bind 期通过 DataContext.get("vNstashed") 取回，context() 必须按名供给
+    Map<String, Object> params = new HashMap<>();
+    Bindable bindable = EnumerableInterpretable.toBindable(params, spark(),
         (EnumerableRel) rel, EnumerableRel.Prefer.ARRAY);
     Enumerable<Object[]> rows;
     try {
-      rows = (Enumerable<Object[]>) bindable.bind(context(connection));
+      rows = (Enumerable<Object[]>) bindable.bind(context(connection, params));
     } catch (SQLException e) {
       throw e;
     } catch (RuntimeException e) {
@@ -89,8 +92,8 @@ final class Exec {
     };
   }
 
-  private static org.apache.calcite.DataContext context(CalciteConnection connection)
-      throws SQLException {
+  private static org.apache.calcite.DataContext context(CalciteConnection connection,
+      Map<String, Object> stashed) throws SQLException {
     JavaTypeFactory typeFactory = connection.getTypeFactory();
     SchemaPlus rootSchema = connection.getRootSchema();
     return new org.apache.calcite.DataContext() {
@@ -107,7 +110,7 @@ final class Exec {
       }
 
       @Override public Object get(String name) {
-        return null;
+        return stashed.get(name);
       }
     };
   }

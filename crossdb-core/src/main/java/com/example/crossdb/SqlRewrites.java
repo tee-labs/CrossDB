@@ -3,6 +3,7 @@ package com.example.crossdb;
 import org.apache.calcite.adapter.java.JavaTypeFactory;
 import org.apache.calcite.schema.SchemaPlus;
 import org.apache.calcite.schema.Table;
+import org.apache.calcite.schema.impl.AggregateFunctionImpl;
 import org.apache.calcite.schema.impl.ScalarFunctionImpl;
 import org.apache.calcite.sql.JoinConditionType;
 import org.apache.calcite.sql.SqlBasicCall;
@@ -30,7 +31,9 @@ import org.apache.calcite.sql.type.SqlTypeName;
 import org.apache.calcite.sql.type.SqlTypeTransformCascade;
 import org.apache.calcite.sql.type.SqlTypeTransforms;
 import org.apache.calcite.sql.util.SqlShuttle;
+import org.apache.calcite.sql.validate.SqlUserDefinedAggFunction;
 import org.apache.calcite.sql.validate.SqlUserDefinedFunction;
+import org.apache.calcite.util.Optionality;
 
 import java.lang.reflect.Method;
 import java.math.BigDecimal;
@@ -113,6 +116,48 @@ final class SqlRewrites {
   private static final SqlUserDefinedFunction LEAST3 = extremumFn("CROSSDB_LEAST3", 3, false);
   private static final SqlUserDefinedFunction LEAST4 = extremumFn("CROSSDB_LEAST4", 4, false);
 
+  /** TIMESTAMPDIFF 本地标量：unit 操作数（SqlIntervalQualifier）改写为字符串字面量。
+   * 操作数派生类型须为 ANY（udf() 按同一类型派生全部操作数，若设 BIGINT 会给
+   * 'DAY' 等字符串参数插入 CAST），返回类型单独声明 BIGINT。 */
+  private static final SqlUserDefinedFunction TIMESTAMPDIFF_FN =
+      udf("CROSSDB_TIMESTAMPDIFF", "timestampDiff",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+
+  private static final SqlUserDefinedAggFunction LISTAGG_DISTINCT_FN =
+      aggFn("CROSSDB_LISTAGG", VARCHAR_NULLABLE,
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.STRING), CrossDbAggregates.ListaggDistinct.class);
+  private static final SqlUserDefinedAggFunction MEDIAN_FN =
+      aggFn("CROSSDB_MEDIAN", ReturnTypes.DOUBLE_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.Median.class);
+  private static final SqlUserDefinedAggFunction PERCENTILE_CONT_FN =
+      aggFn("CROSSDB_PERCENTILE_CONT", ReturnTypes.DOUBLE_NULLABLE,
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY), CrossDbAggregates.PercentileCont.class);
+  private static final SqlUserDefinedAggFunction NTH_VALUE2_FN =
+      aggFn("CROSSDB_NTH_VALUE2", ANY_NULLABLE, List.of(SqlTypeFamily.ANY),
+          CrossDbAggregates.NthValue2.class);
+  private static final SqlUserDefinedAggFunction NTH_VALUE3_FN =
+      aggFn("CROSSDB_NTH_VALUE3", ANY_NULLABLE, List.of(SqlTypeFamily.ANY),
+          CrossDbAggregates.NthValue3.class);
+  private static final SqlUserDefinedAggFunction NTH_VALUE4_FN =
+      aggFn("CROSSDB_NTH_VALUE4", ANY_NULLABLE, List.of(SqlTypeFamily.ANY),
+          CrossDbAggregates.NthValue4.class);
+
+  /** 注册进引擎操作符表的本地 UDAF（名字 SQL 不可见，仅由解析期改写挂载）。 */
+  private static final List<org.apache.calcite.sql.SqlOperator> AGGS = List.of(
+      LISTAGG_DISTINCT_FN, MEDIAN_FN, PERCENTILE_CONT_FN,
+      NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN);
+
+  private static SqlUserDefinedAggFunction aggFn(String name, SqlReturnTypeInference ret,
+      List<SqlTypeFamily> fams, Class<?> impl) {
+    SqlOperandMetadata meta = OperandTypes.operandMetadata(fams,
+        tf -> Collections.nCopies(fams.size(), tf.createSqlType(SqlTypeName.ANY)),
+        i -> "VALUE", i -> true);
+    return new SqlUserDefinedAggFunction(new SqlIdentifier(name, SqlParserPos.ZERO),
+        SqlKind.OTHER_FUNCTION, ret, null, meta,
+        AggregateFunctionImpl.create(impl), true, false, Optionality.IGNORED);
+  }
+
   /** 注册进引擎操作符表的本地函数（名字即 SQL 可见名；与标准表无同名冲突）。
    * 注意：解析期改写「按名挂载」的操作符（INITCAP/GREATEST/LEAST/NTH_VALUE 等）
    * 同样必须在此注册——校验器对已挂载的函数调用仍会按名重查操作符表。 */
@@ -141,7 +186,17 @@ final class SqlRewrites {
           SqlTypeName.ANY, ARG0_NULLABLE),
       FLOOR_UNIT_FN, CEIL_UNIT_FN, OVERLAY_FN_3, OVERLAY_FN_4, INITCAP_FN,
       SIMILAR_FN_2, SIMILAR_FN_3,
-      GREATEST2, GREATEST3, GREATEST4, LEAST2, LEAST3, LEAST4);
+      GREATEST2, GREATEST3, GREATEST4, LEAST2, LEAST3, LEAST4,
+      TIMESTAMPDIFF_FN);
+  /** 全部本地操作符（标量 UDF + 聚合/窗口 UDAF）：注册进引擎操作符表。 */
+  static final List<org.apache.calcite.sql.SqlOperator> OPERATORS;
+  static {
+    List<org.apache.calcite.sql.SqlOperator> all =
+        new ArrayList<>(UDFS.size() + AGGS.size());
+    all.addAll(UDFS);
+    all.addAll(AGGS);
+    OPERATORS = List.copyOf(all);
+  }
 
   private static SqlUserDefinedFunction extremumFn(String name, int arity, boolean greatest) {
     String impl = (greatest ? "greatest" : "least") + arity;
@@ -186,6 +241,7 @@ final class SqlRewrites {
       case "overlay4" -> new Class<?>[]{String.class, String.class, BigDecimal.class, BigDecimal.class};
       case "floorUnit", "ceilUnit" -> new Class<?>[]{Object.class, String.class};
       case "nvl", "ifnull" -> new Class<?>[]{Object.class, Object.class};
+      case "timestampDiff" -> new Class<?>[]{String.class, Object.class, Object.class};
       case "concat2" -> new Class<?>[]{String.class, String.class};
       case "concat3" -> new Class<?>[]{String.class, String.class, String.class};
       case "concatWs2" -> new Class<?>[]{String.class, Object.class, Object.class};
@@ -275,11 +331,28 @@ final class SqlRewrites {
         }
         String name = call.getOperator().getName();
         String upper = name.toUpperCase();
+        if (call.getKind() == SqlKind.TIMESTAMP_DIFF || upper.equals("TIMESTAMPDIFF")) {
+          return rewriteTimestampDiff(call);
+        }
         if (upper.equals("STRING_AGG") || upper.equals("GROUP_CONCAT")) {
           return rewriteListAgg(call);
         }
+        if (upper.equals("LISTAGG")) {
+          // 注意：解析器构造的 LISTAGG 是 SqlListaggAggFunction 专有实例，
+          // 不能按操作符实例判等，须按名匹配
+          return rewriteListaggDistinct(call);
+        }
         if (upper.equals("GREATEST") || upper.equals("LEAST")) {
           return rewriteExtremum(call);
+        }
+        if (upper.equals("MEDIAN")) {
+          List<SqlNode> ops = call.getOperandList();
+          return ops.size() == 1
+              ? new SqlBasicCall(MEDIAN_FN, ops, call.getParserPosition())
+              : call;
+        }
+        if (call.getKind() == SqlKind.WITHIN_GROUP) {
+          return rewriteWithinGroup(call);
         }
         if (call.getKind() == SqlKind.OTHER_FUNCTION) {
           return switch (upper) {
@@ -346,10 +419,14 @@ final class SqlRewrites {
         sep = op;
       }
     }
-    SqlBasicCall listagg = new SqlBasicCall(SqlStdOperatorTable.LISTAGG,
-        List.of(value, sep), pos);
-    return order == null ? listagg
-        : new SqlBasicCall(new SqlWithinGroupOperator(), List.of(listagg, order), pos);
+    // 原调用带 DISTINCT 量化符（STRING_AGG(DISTINCT ..) / GROUP_CONCAT(DISTINCT ..)）：
+    // 直接换成本地去重 UDAF，避免静默丢失去重语义
+    boolean distinct = call instanceof SqlBasicCall basic && basic.getFunctionQuantifier() != null;
+    SqlNode rewritten = distinct
+        ? new SqlBasicCall(LISTAGG_DISTINCT_FN, List.of(value, sep), pos)
+        : new SqlBasicCall(SqlStdOperatorTable.LISTAGG, List.of(value, sep), pos);
+    return order == null ? rewritten
+        : new SqlBasicCall(new SqlWithinGroupOperator(), List.of(rewritten, order), pos);
   }
 
   /** GREATEST/LEAST(a, b, ...) → 按元数挂载对应本地 UDF（跳过 NULL 取极值）。 */
@@ -370,8 +447,79 @@ final class SqlRewrites {
     return new SqlBasicCall(fn, call.getOperandList(), call.getParserPosition());
   }
 
+  /** TIMESTAMPDIFF(unit, a, b)（Calcite SqlTimestampDiffFunction，下推源库普遍无此
+   * 函数）→ CROSSDB_TIMESTAMPDIFF('unit', a, b) 本地求值。兼容 BigQuery 的
+   * 「时间在前、unit 在后」参数顺序。无法安全改写的形态原样保留。 */
+  private static SqlNode rewriteTimestampDiff(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 3) {
+      return call;
+    }
+    SqlIntervalQualifier unit = null;
+    List<SqlNode> times = new ArrayList<>();
+    for (SqlNode op : ops) {
+      if (op instanceof SqlIntervalQualifier q && unit == null) {
+        unit = q;
+      } else {
+        times.add(op);
+      }
+    }
+    if (unit == null || unit.getStartUnit() == null || times.size() != 2) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    return new SqlBasicCall(TIMESTAMPDIFF_FN, List.of(
+        SqlLiteral.createCharString(unit.getStartUnit().toString(), pos),
+        times.get(0), times.get(1)), pos);
+  }
+
+  /** WITHIN GROUP 包装改写：
+   * <ul>
+   *   <li>PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x) → CROSSDB_PERCENTILE_CONT(x, p)
+   *   （Enumerable 无原生实现）；</li>
+   *   <li>LISTAGG(DISTINCT x, sep) WITHIN GROUP (ORDER BY x) → CROSSDB_LISTAGG(x, sep)
+   *   （原生 LISTAGG DISTINCT 计划期 AIOOBE；排序内置为按值升序，故要求 ORDER BY
+   *   与取值表达式一致，否则保留原形态交由校验器报错）；</li>
+   * </ul> */
+  private static SqlNode rewriteWithinGroup(SqlCall within) {
+    List<SqlNode> ops = within.getOperandList();
+    if (ops.size() != 2 || !(ops.get(0) instanceof SqlCall agg)
+        || !(ops.get(1) instanceof SqlNodeList order) || order.size() != 1) {
+      return within;
+    }
+    SqlParserPos pos = within.getParserPosition();
+    if (agg.getOperator() == PERCENTILE_CONT_FN || agg.getKind() == SqlKind.PERCENTILE_CONT
+        || agg.getOperator().getName().equalsIgnoreCase("PERCENTILE_CONT")) {
+      List<SqlNode> aggOps = agg.getOperandList();
+      if (aggOps.size() == 1) {
+        return new SqlBasicCall(PERCENTILE_CONT_FN,
+            List.of(order.get(0), aggOps.get(0)), pos);
+      }
+      return within;
+    }
+    if (agg.getOperator() == LISTAGG_DISTINCT_FN) {
+      // 内层 LISTAGG(DISTINCT ..) 已被改写；仅当排序表达式与取值一致时去掉包装
+      List<SqlNode> aggOps = agg.getOperandList();
+      if (aggOps.size() == 2 && order.get(0).equals(aggOps.get(0))) {
+        return agg;
+      }
+    }
+    return within;
+  }
+
+  /** LISTAGG(DISTINCT x, sep) → CROSSDB_LISTAGG(x, sep)（DISTINCT 量化符剥离，
+   * 去重 + 按值升序由本地 UDAF 实现；排序语义由 WITHIN GROUP 包装层收口）。 */
+  private static SqlNode rewriteListaggDistinct(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2 || !(call instanceof SqlBasicCall basic)
+        || basic.getFunctionQuantifier() == null) {
+      return call;
+    }
+    return new SqlBasicCall(LISTAGG_DISTINCT_FN, ops, call.getParserPosition());
+  }
+
   /** 窗口聚合改写：CUME_DIST/PERCENT_RANK 用 RANK/COUNT(*) 等价表达；
-   * NTH_VALUE 换成本地窗口聚合。其余原样。 */
+   * NTH_VALUE 换成本地窗口聚合（帧内第 n 行）；其余原样。 */
   private static SqlNode rewriteOver(SqlCall over) {
     List<SqlNode> ops = over.getOperandList();
     if (ops.size() != 2 || !(ops.get(0) instanceof SqlCall agg)
@@ -380,8 +528,7 @@ final class SqlRewrites {
     }
     SqlParserPos pos = over.getParserPosition();
     switch (agg.getOperator().getName().toUpperCase()) {
-      case "CUME_DIST" -> {
-        // CUME_DIST() OVER w == RANK() OVER w / COUNT(*) OVER (同分区、无排序)
+      case "CUME_DIST" -> {        // CUME_DIST() OVER w == RANK() OVER w / COUNT(*) OVER (同分区、无排序)
         return new SqlBasicCall(SqlStdOperatorTable.DIVIDE, List.of(
             castDouble(over(rank(pos), w, pos), pos),
             over(count(pos), partitionOnly(w), pos)), pos);
@@ -396,8 +543,25 @@ final class SqlRewrites {
                 over(count(pos), partitionOnly(w), pos),
                 SqlLiteral.createExactNumeric("1", pos)), pos)), pos);
       }
-      // NTH_VALUE 不改写：本地 UDAF 方案受 Calcite 缺陷限制（窗口聚合的常量参数
-      // 会被输入投影裁剪成 NULL 列），保持原样由源库求值。
+      case "NTH_VALUE" -> {
+        // NTH_VALUE(x, n) → CROSSDB_NTH_VALUE{n}(x)：本地窗口聚合按「帧内第 n 行」
+        // 取值（Calcite 内建与源库均按整分区取值、忽略帧）。常量 n 不进操作数、
+        // 编码进函数名，绕开窗口聚合常量参数被输入投影裁剪的缺陷；n 不在 1..4
+        // 时保留原样。
+        List<SqlNode> aggOps = agg.getOperandList();
+        if (aggOps.size() == 2 && aggOps.get(1) instanceof SqlLiteral lit
+            && lit.getValue() instanceof Number num
+            && num.intValue() >= 2 && num.intValue() <= 4) {
+          SqlUserDefinedAggFunction fn = switch (num.intValue()) {
+            case 2 -> NTH_VALUE2_FN;
+            case 3 -> NTH_VALUE3_FN;
+            default -> NTH_VALUE4_FN;
+          };
+          return over(new SqlBasicCall(fn, List.of(aggOps.get(0)), agg.getParserPosition()),
+              w, pos);
+        }
+        return over;
+      }
       default -> {
         return over;
       }

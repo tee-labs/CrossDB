@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -364,11 +363,10 @@ class CrossDbCompatibilityTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: Calcite 本地实现与源库（H2）的 NTH_VALUE 均忽略窗口帧、按整分区取值"
-        + "（标准默认帧 RANGE UNBOUNDED PRECEDING AND CURRENT ROW 下首行应为 NULL）；"
-        + "本地 UDAF 重实现方案受 Calcite 窗口常量列裁剪缺陷限制，待支持")
-    void nthValueWindow() throws Exception {
+    @Test void nthValueWindow() throws Exception {
+      // 修复记录：NTH_VALUE 曾由源库求值（忽略帧、按整分区取值），现改写为
+      // CROSSDB_NTH_VALUE{n} 本地窗口聚合，遵循标准「帧内第 n 行」语义：
+      // 默认帧 RANGE UNBOUNDED PRECEDING..CURRENT ROW 下首行帧内只有 1 行 → NULL
       try (CrossDb db = core()) {
         assertEquals(List.of("100,NULL", "101,101", "102,101", "103,101"),
             rows(db, "SELECT id, NTH_VALUE(id, 2) OVER (ORDER BY id) "
@@ -618,11 +616,9 @@ class CrossDbCompatibilityTest {
   @DisplayName("递归 CTE、PIVOT 与方言语法场景")
   class DialectFeatures {
 
-    @Test
-    @Disabled("待支持: Calcite 内核无 RepeatUnion 物理算子，递归 CTE 无法落地执行计划"
-        + "（需自研迭代执行算子），待支持")
-    void recursiveCteCounting() throws Exception {
-      // WITH RECURSIVE 计数到 3（PostgreSQL regress 经典形态）
+    @Test void recursiveCteCounting() throws Exception {
+      // 修复记录：Calcite 1.38 已有 EnumerableRepeatUnion 物理算子，此前执行期 NPE
+      // 系引擎 DataContext 未回供计划暂存对象（TransientTable），已修复
       try (CrossDb db = core()) {
         assertEquals("3", scalar(db, "WITH RECURSIVE t(n) AS "
             + "(VALUES (1) UNION ALL SELECT n + 1 FROM t WHERE n < 3) "

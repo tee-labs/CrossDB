@@ -197,6 +197,12 @@ public final class CrossDbFunctions {
     return a != null ? a : b;
   }
 
+  /** TIMESTAMPDIFF(unit, a, b)：完整单位数差值（MySQL 语义），实现见
+   * {@link CrossDbAggregates#timestampDiff}。 */
+  public static Long timestampDiff(String unit, Object a, Object b) {
+    return CrossDbAggregates.timestampDiff(unit, a, b);
+  }
+
   /** FLOOR(timestamp/date TO unit)：datetime 截断（标准 SQL 语义，本地求值，
    * 避免下推源库方言不支持 {@code FLOOR(x TO unit)} 语法）。入参承载约定与
    * Exec/Enumerable 一致：TIMESTAMP → Long（epoch millis），DATE → Integer（epoch days）。 */

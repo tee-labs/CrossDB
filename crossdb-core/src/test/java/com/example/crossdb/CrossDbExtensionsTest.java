@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -71,10 +70,9 @@ class CrossDbExtensionsTest {
       }
     }
 
-    @Test
-    @Disabled("待修复: 裸 VALUES 派生表（无 JOIN）触发引擎计划收尾 CCE"
-        + "（RelCompositeTrait → RelCollation），待修复")
-    void valuesConstructorBare() throws Exception {
+    @Test void valuesConstructorBare() throws Exception {
+      // 修复记录：裸 VALUES 派生表曾因校验器附加复合排序特征触发计划收尾断言失败，
+      // 引擎已对非 simple 的 requiredTraits 净化后放行
       try (CrossDb db = core()) {
         assertEquals(List.of("1,x", "2,y"),
             rows(db, "SELECT t.id, t.n FROM (VALUES (1, 'x'), (2, 'y')) AS t(id, n)"));
@@ -101,14 +99,14 @@ class CrossDbExtensionsTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: CROSS APPLY 别名带列名清单 t(o.id) 解析不支持，待支持")
-    void crossApplyWithColumnList() throws Exception {
+    @Test void crossApplyWithColumnList() throws Exception {
+      // 列别名须为不带限定名的标识符：原 t(o.id) 形态解析器不支持（且外层 o.id
+      // 在 APPLY 作用域外不可解析，本属无效 SQL），改用单段名 t(oid)
       try (CrossDb db = core()) {
         assertEquals(List.of("alice,100", "bob,101", "alice,102", "bob,103"),
-            rows(db, "SELECT u.name, o.id FROM userdb.users u "
-                + "CROSS APPLY (SELECT id FROM orderdb.orders o WHERE o.user_id = u.id) t(o.id) "
-                + "ORDER BY o.id"));
+            rows(db, "SELECT u.name, t.oid FROM userdb.users u "
+                + "CROSS APPLY (SELECT id FROM orderdb.orders o WHERE o.user_id = u.id) t(oid) "
+                + "ORDER BY t.oid"));
       }
     }
 
@@ -216,9 +214,9 @@ class CrossDbExtensionsTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: TIMESTAMPDIFF 下推 H2 无法实现且本地求值 UDF 未注册，待支持")
-    void timestampDiffFunction() throws Exception {
+    @Test void timestampDiffFunction() throws Exception {
+      // 修复记录：TIMESTAMPDIFF 曾尝试下推 H2（无对应函数）执行失败，现已改写为
+      // CROSSDB_TIMESTAMPDIFF 本地求值
       try (CrossDb db = core()) {
         assertEquals("10", scalarOf(db,
             "SELECT TIMESTAMPDIFF(DAY, ts, TIMESTAMP '2026-01-12 03:04:05') "
@@ -301,28 +299,27 @@ class CrossDbExtensionsTest {
       }
     }
 
-    @Test
-    @Disabled("待修复: LISTAGG(DISTINCT ..) 触发 ArrayIndexOutOfBoundsException，待修复")
-    void listaggDistinct() throws Exception {
+    @Test void listaggDistinct() throws Exception {
+      // 修复记录：LISTAGG(DISTINCT ..) 曾触发原生计划 ArrayIndexOutOfBoundsException，
+      // 现改写为 CROSSDB_LISTAGG 本地去重；标准语义 = 去重后按 WITHIN GROUP 升序拼接
+      // （user 1: {5,10} → "5;10"；user 2: {1,20} → "1;20"）
       try (CrossDb db = core()) {
-        assertEquals(List.of("1,10;5", "2,1;20"),
+        assertEquals(List.of("1,5;10", "2,1;20"),
             rows(db, "SELECT user_id, LISTAGG(DISTINCT amount, ';') "
                 + "WITHIN GROUP (ORDER BY amount) FROM orderdb.orders GROUP BY user_id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: MEDIAN 未注册（Oracle/Calcite library 聚合），待支持")
-    void medianAggregate() throws Exception {
+    @Test void medianAggregate() throws Exception {
+      // 修复记录：MEDIAN 已注册为本地聚合（CROSSDB_MEDIAN），偶数行取中间两值均值
       try (CrossDb db = core()) {
         assertEquals("7.5", scalarOf(db, "SELECT MEDIAN(amount) FROM orderdb.orders"));
       }
     }
 
-    @Test
-    @Disabled("待支持: PERCENTILE_CONT 有序集聚合本地实现缺失"
-        + "（UnsupportedOperationException），待支持")
-    void percentileContOrderedSetAggregate() throws Exception {
+    @Test void percentileContOrderedSetAggregate() throws Exception {
+      // 修复记录：PERCENTILE_CONT 有序集聚合已改写为 CROSSDB_PERCENTILE_CONT
+      // 本地连续插值实现
       try (CrossDb db = core()) {
         assertEquals("7.5", scalarOf(db, "SELECT PERCENTILE_CONT(0.5) "
             + "WITHIN GROUP (ORDER BY amount) FROM orderdb.orders"));
