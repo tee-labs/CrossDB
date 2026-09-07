@@ -18,6 +18,7 @@ import org.apache.calcite.sql.SqlNode;
 import org.apache.calcite.sql.SqlNodeList;
 import org.apache.calcite.sql.SqlSelect;
 import org.apache.calcite.sql.SqlWithinGroupOperator;
+import org.apache.calcite.sql.fun.SqlCase;
 import org.apache.calcite.sql.fun.SqlStdOperatorTable;
 import org.apache.calcite.sql.parser.SqlParserPos;
 import org.apache.calcite.sql.type.OperandTypes;
@@ -62,6 +63,12 @@ import java.util.regex.Pattern;
  *   <li>NTH_VALUE → CROSSDB_NTH_VALUE 本地窗口聚合（Calcite 与常见源库均忽略
  *   窗口帧、按整分区取值，与标准「帧内第 n 行」语义不符）；</li>
  *   <li>STRING_AGG / GROUP_CONCAT（PostgreSQL/MySQL 聚合）→ 标准 LISTAGG；</li>
+ *   <li>DECODE（Oracle，未注册于标准操作符表）→ CASE WHEN .. IS NOT DISTINCT FROM
+ *   等价改写（NULL=NULL 相等语义保留）；</li>
+ *   <li>LEFT SEMI/ANTI JOIN（Calcite 解析器不支持的语法）→ 等价 CROSS APPLY
+ *   (SELECT 1 .. HAVING COUNT(*) 比较)；</li>
+ *   <li>FETCH FIRST n ROWS WITH TIES（Calcite 解析器不支持）→ 「前 n 个去重键组」
+ *   等价 IN 半连接改写（裸列键）；</li>
  *   <li>USING 共享列裸引用（Calcite 校验器 AssertionError，上游缺陷）→ 等价 ON
  *   等值连接 + 裸引用替换为 COALESCE(l.c, r.c)；</li>
  *   <li>表别名列名清单 FROM t(a, b)（标准 SQL）→ 派生表列重命名。</li>
@@ -282,14 +289,32 @@ final class SqlRewrites {
     }
   }
 
-  // ---------- SQL 文本预处理（TOP → FETCH FIRST） ----------
+  // ---------- SQL 文本预处理（TOP → FETCH FIRST、SEMI/ANTI JOIN、WITH TIES） ----------
 
   private static final Pattern TOP = Pattern.compile(
       "(?is)^(\\s*SELECT\\s+(?:DISTINCT\\s+|ALL\\s+)?)TOP\\s*\\(?\\s*(\\d+)\\s*\\)?");
+  private static final Pattern SEMI_ANTI_JOIN = Pattern.compile(
+      "(?i)\\bLEFT\\s+(SEMI|ANTI)\\s+JOIN\\b");
+  private static final Pattern FETCH_WITH_TIES = Pattern.compile(
+      "(?i)\\bFETCH\\s+(?:FIRST|NEXT)\\s+(\\d+)\\s+ROWS?\\s+WITH\\s+TIES\\s*(;?)\\s*$");
+  /** ON 条件扫描在深度 0 遇到这些子句关键字即止。 */
+  private static final java.util.Set<String> CLAUSE_STOPPERS = java.util.Set.of(
+      "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "UNION",
+      "INTERSECT", "EXCEPT", "JOIN", "LEFT", "RIGHT", "INNER", "CROSS", "FULL",
+      "OUTER", "NATURAL", "ON", "APPLY");
+
+  /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES。
+   * 各改写仅在能安全识别边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
+  static String preprocess(String sql) {
+    sql = preprocessTop(sql);
+    sql = preprocessSemiAntiJoin(sql);
+    sql = preprocessFetchWithTies(sql);
+    return sql;
+  }
 
   /** 语句级 TOP n 改写为末尾 FETCH FIRST n ROWS ONLY（语义：有 ORDER BY 取前 n 行、
    * 无 ORDER BY 任取 n 行，与 T-SQL TOP 一致）。不匹配则原样返回。 */
-  static String preprocess(String sql) {
+  private static String preprocessTop(String sql) {
     Matcher m = TOP.matcher(sql);
     if (!m.find()) {
       return sql;
@@ -303,6 +328,334 @@ final class SqlRewrites {
       trimmed = rest;
     }
     return m.group(1) + trimmed + " FETCH FIRST " + m.group(2) + " ROWS ONLY" + semi;
+  }
+
+  /** LEFT SEMI/ANTI JOIN（Calcite 解析器不支持的语法）→ 等价相关 APPLY：
+   * <ul>
+   *   <li>{@code A LEFT SEMI JOIN B ON cond} →
+   *       {@code A CROSS APPLY (SELECT 1 FROM B WHERE cond HAVING COUNT(*) >= 1)}
+   *       （有匹配输出 1 行、无匹配空集，内连接丢空行即 SEMI 语义）；</li>
+   *   <li>{@code A LEFT ANTI JOIN B ON cond} →
+   *       {@code A CROSS APPLY (SELECT 1 FROM B WHERE cond HAVING COUNT(*) = 0)}
+   *       （无匹配输出 1 行、有匹配空集，即 ANTI 语义）。</li>
+   * </ul>
+   * 聚合空集仍返回单行使去相关稳定（无需 LIMIT）。右侧 FROM 项与 ON 条件边界
+   * 无法安全识别（USING/NATURAL、关键字歧义等）时该处保留原样。 */
+  private static String preprocessSemiAntiJoin(String sql) {
+    if (!SEMI_ANTI_JOIN.matcher(sql).find()) {
+      return sql;
+    }
+    boolean[] live = liveMask(sql);
+    StringBuilder out = new StringBuilder(sql.length());
+    int pos = 0;
+    Matcher m = SEMI_ANTI_JOIN.matcher(sql);
+    while (m.find()) {
+      if (!spanLive(live, m.start(), m.end()) || m.start() < pos) {
+        continue;   // 字面量内的伪命中，或上一条件括号内嵌套的 SEMI/ANTI（已随条件整体保留）
+      }
+      // 关键字之前的段落先落盘（SEMI/ANTI JOIN 关键字由 CROSS APPLY 形态替换），
+      // 再尝试解析右侧 FROM 项与 ON 条件
+      int[] tail = parseJoinTail(sql, live, m.end());
+      if (tail == null) {
+        continue;
+      }
+      out.append(sql, pos, m.start());
+      boolean anti = m.group(1).equalsIgnoreCase("ANTI");
+      out.append("CROSS APPLY (SELECT 1 FROM ")
+          .append(sql, tail[0], tail[1])
+          .append(" WHERE ")
+          .append(sql, tail[2], tail[3])
+          .append(" HAVING COUNT(*) ").append(anti ? "= 0" : ">= 1")
+          .append(')');
+      pos = tail[3];
+    }
+    if (pos == 0) {
+      return sql;
+    }
+    return out.append(sql.substring(pos)).toString();
+  }
+
+  /** 解析 SEMI/ANTI JOIN 尾段：跳过空白与右侧 FROM 项（括号包裹的子查询或点分
+   * 标识符 + 可选别名），要求后随 ON，条件止于深度 0 的子句关键字/逗号/右括号。
+   * 返回 {rhsStart, rhsEnd, condStart, condEnd}，无法安全解析返回 null。 */
+  private static int[] parseJoinTail(String sql, boolean[] live, int from) {
+    int n = sql.length();
+    int i = skipBlank(sql, live, from);
+    if (i >= n) {
+      return null;
+    }
+    int rhsStart = i;
+    if (sql.charAt(i) == '(') {
+      i = matchParen(sql, live, i);
+      if (i < 0) {
+        return null;
+      }
+    } else {
+      if (!isIdentStart(sql.charAt(i))) {
+        return null;
+      }
+      while (i < n && live[i] && (isIdentPart(sql.charAt(i)) || sql.charAt(i) == '.')) {
+        i++;
+      }
+    }
+    int afterRhs = skipBlank(sql, live, i);
+    if (!keywordAt(sql, live, afterRhs, "ON")) {
+      // 右侧 FROM 项的可选别名（表别名 / 派生表别名）
+      if (afterRhs < n && live[afterRhs] && isIdentStart(sql.charAt(afterRhs))) {
+        int aliasEnd = afterRhs;
+        while (aliasEnd < n && live[aliasEnd] && isIdentPart(sql.charAt(aliasEnd))) {
+          aliasEnd++;
+        }
+        afterRhs = skipBlank(sql, live, aliasEnd);
+      }
+      if (!keywordAt(sql, live, afterRhs, "ON")) {
+        return null;
+      }
+    }
+    int condStart = afterRhs + 2;
+    int depth = 0;
+    int prevLive = -1;
+    for (int j = condStart; j < n; j++) {
+      if (!live[j]) {
+        continue;
+      }
+      char c = sql.charAt(j);
+      if (Character.isWhitespace(c)) {
+        continue;
+      }
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        if (depth == 0) {
+          return new int[]{rhsStart, afterRhs, condStart, j};
+        }
+        depth--;
+      } else if (c == ',' && depth == 0) {
+        return new int[]{rhsStart, afterRhs, condStart, j};
+      } else if (depth == 0 && isIdentStart(c) && prevLive != '.') {
+        String word = wordAt(sql, j);
+        if (CLAUSE_STOPPERS.contains(word.toUpperCase())) {
+          return new int[]{rhsStart, afterRhs, condStart, j};
+        }
+        j += word.length() - 1;
+      }
+      prevLive = c;
+    }
+    return new int[]{rhsStart, afterRhs, condStart, n};
+  }
+
+  /** FETCH FIRST n ROW[S] WITH TIES（Calcite 解析器不支持）→ 等价改写：
+   * 「rank ≤ n」等价于「键值属于排序后前 n 个去重键组」，故改写为
+   * {@code SELECT * FROM (core) s WHERE (keys) IN
+   * (SELECT keys FROM (core) c GROUP BY keys ORDER BY keys FETCH FIRST n ROWS ONLY)}
+   * ，无多余输出列。边界：仅语句级形态（WITH TIES 在语句末尾）；键须为（可带
+   * 限定符的）裸列、不支持序数与显式 NULLS FIRST/LAST（IN 对 NULL 组行的三值
+   * 逻辑限制）；ORDER BY 键须为 core 输出列。无法安全识别边界时原样保留，
+   * 交由解析器报真实错误。 */
+  private static String preprocessFetchWithTies(String sql) {
+    Matcher m = FETCH_WITH_TIES.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    String suffix = m.group(2);
+    boolean[] live = liveMask(sql);
+    int[] orderBy = lastTopLevelOrderBy(sql, live, m.start());
+    if (orderBy == null) {
+      return sql;
+    }
+    List<String> keys = new ArrayList<>();
+    List<String> directions = new ArrayList<>();
+    if (!parseOrderKeys(sql.substring(orderBy[1], m.start()).trim(), keys, directions)) {
+      return sql;
+    }
+    String core = sql.substring(0, orderBy[0]);
+    String keyList = String.join(", ", keys);
+    String orderList = "";
+    for (int i = 0; i < keys.size(); i++) {
+      orderList += (i > 0 ? ", " : "") + keys.get(i) + " " + directions.get(i);
+    }
+    String inList = "SELECT " + keyList + " FROM (" + core + ") crossdb_ties_src "
+        + "GROUP BY " + keyList + " ORDER BY " + orderList
+        + " FETCH FIRST " + m.group(1) + " ROWS ONLY";
+    return "SELECT * FROM (" + core + ") crossdb_ties_row WHERE (" + keyList + ") IN ("
+        + inList + ") ORDER BY " + orderList + suffix;
+  }
+
+  /** 解析 ORDER BY 键清单：每项须为（可带限定符的）裸列名 + 可选 ASC/DESC；
+   * 表达式、序数、显式 NULLS FIRST/LAST 均不支持（返回 false 原样保留）。
+   * 限定符剥离为裸列名（在 core 派生表内按列名解析）。 */
+  private static boolean parseOrderKeys(String keysText, List<String> keys,
+      List<String> directions) {
+    if (keysText.isEmpty()) {
+      return false;
+    }
+    for (String piece : keysText.split(",")) {
+      String p = piece.trim();
+      if (p.isEmpty()) {
+        return false;
+      }
+      String dir = "ASC";
+      Matcher dirM = java.util.regex.Pattern.compile(
+          "(?i)\\s+(ASC|DESC)(\\s+NULLS\\s+(FIRST|LAST))?$").matcher(p);
+      if (dirM.find()) {
+        dir = dirM.group(1).toUpperCase();
+        if (dirM.group(2) != null) {
+          return false;
+        }
+        p = p.substring(0, dirM.start()).trim();
+      }
+      if (!p.matches("(?i)[a-z_][a-z0-9_$]*(\\s*\\.\\s*[a-z_][a-z0-9_$]*)*")) {
+        return false;
+      }
+      keys.add(p.substring(p.lastIndexOf('.') + 1).trim());
+      directions.add(dir);
+    }
+    return !keys.isEmpty();
+  }
+
+  /** 深度 0 的最后一个 ORDER BY 关键字位置（{关键字起点, 列清单起点}）；
+   * 与 FETCH 之间出现深度 0 的 OFFSET/集合操作关键字则视为不支持。 */
+  private static int[] lastTopLevelOrderBy(String sql, boolean[] live, int limit) {
+    int depth = 0;
+    int[] last = null;
+    int prevLive = -1;
+    for (int i = 0; i < limit; i++) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (depth == 0 && isIdentStart(c) && prevLive != '.') {
+        String word = wordAt(sql, i);
+        String upper = word.toUpperCase();
+        if (upper.equals("ORDER") && keywordAt(sql, live, i, "ORDER BY")) {
+          last = new int[]{i, i + "ORDER BY".length()};
+        } else if (last != null && (upper.equals("OFFSET") || upper.equals("UNION")
+            || upper.equals("INTERSECT") || upper.equals("EXCEPT"))) {
+          return null;
+        }
+        i += word.length() - 1;
+      }
+      if (!Character.isWhitespace(c)) {
+        prevLive = c;
+      }
+    }
+    return last;
+  }
+
+  /** ORDER BY 键清单是否含序数项（纯数字键在窗口 ORDER BY 内是常量，语义不同）。 */
+
+  /** 活字符掩码：字符串字面量、引号标识符与注释内的位置为 false。 */
+  private static boolean[] liveMask(String sql) {
+    int n = sql.length();
+    boolean[] live = new boolean[n];
+    int i = 0;
+    while (i < n) {
+      char c = sql.charAt(i);
+      if (c == '\'' || c == '"' || c == '`') {
+        char quote = c;
+        int j = i + 1;
+        while (j < n) {
+          if (sql.charAt(j) == quote) {
+            if (j + 1 < n && sql.charAt(j + 1) == quote) {
+              j += 2;   // 双写转义
+              continue;
+            }
+            j++;
+            break;
+          }
+          j++;
+        }
+        i = j;
+      } else if (c == '-' && i + 1 < n && sql.charAt(i + 1) == '-') {
+        while (i < n && sql.charAt(i) != '\n') {
+          i++;
+        }
+      } else if (c == '/' && i + 1 < n && sql.charAt(i + 1) == '*') {
+        i += 2;
+        while (i + 1 < n && !(sql.charAt(i) == '*' && sql.charAt(i + 1) == '/')) {
+          i++;
+        }
+        i = Math.min(i + 2, n);
+      } else {
+        live[i] = true;
+        i++;
+      }
+    }
+    return live;
+  }
+
+  private static boolean spanLive(boolean[] live, int start, int end) {
+    for (int i = start; i < end; i++) {
+      if (!live[i]) {
+        return false;
+      }
+    }
+    return true;
+  }
+
+  /** 自 start 起跳过空白（仅活字符位置），返回下一个活字符下标。 */
+  private static int skipBlank(String sql, boolean[] live, int start) {
+    int i = start;
+    while (i < sql.length() && (!live[i] || Character.isWhitespace(sql.charAt(i)))) {
+      i++;
+    }
+    return i;
+  }
+
+  /** 括号匹配：返回 ')' 之后的位置，不匹配返回 -1。 */
+  private static int matchParen(String sql, boolean[] live, int open) {
+    int depth = 0;
+    for (int i = open; i < sql.length(); i++) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')' && --depth == 0) {
+        return i + 1;
+      }
+    }
+    return -1;
+  }
+
+  /** i 处是否为关键字 keyword（大小写不敏感、词间任意空白、词边界完整）。 */
+  private static boolean keywordAt(String sql, boolean[] live, int start, String keyword) {
+    String[] words = keyword.toUpperCase().split("\\s+");
+    int i = start;
+    for (String word : words) {
+      i = skipBlank(sql, live, i);
+      if (i >= sql.length() || !sql.regionMatches(true, i, word, 0, word.length())) {
+        return false;
+      }
+      int end = i + word.length();
+      if (end < sql.length() && live[end] && isIdentPart(sql.charAt(end))) {
+        return false;
+      }
+      i = end;
+    }
+    return true;
+  }
+
+  /** 自 i 起的完整标识符/关键字词（含词内部分）。 */
+  private static String wordAt(String sql, int i) {
+    int j = i;
+    while (j < sql.length() && isIdentPart(sql.charAt(j))) {
+      j++;
+    }
+    return sql.substring(i, j);
+  }
+
+  private static boolean isIdentStart(char c) {
+    return Character.isLetter(c) || c == '_';
+  }
+
+  private static boolean isIdentPart(char c) {
+    return Character.isLetterOrDigit(c) || c == '_' || c == '$';
   }
 
   // ---------- 解析树改写 ----------
@@ -344,6 +697,9 @@ final class SqlRewrites {
         }
         if (upper.equals("GREATEST") || upper.equals("LEAST")) {
           return rewriteExtremum(call);
+        }
+        if (upper.equals("DECODE")) {
+          return rewriteDecode(call);
         }
         if (upper.equals("MEDIAN")) {
           List<SqlNode> ops = call.getOperandList();
@@ -427,6 +783,30 @@ final class SqlRewrites {
         : new SqlBasicCall(SqlStdOperatorTable.LISTAGG, List.of(value, sep), pos);
     return order == null ? rewritten
         : new SqlBasicCall(new SqlWithinGroupOperator(), List.of(rewritten, order), pos);
+  }
+
+  /** DECODE(e, s1, r1[, s2, r2...][, default]) → 等价 searched CASE：
+   * {@code CASE WHEN e IS NOT DISTINCT FROM s1 THEN r1 ... [ELSE default] END}
+   * （Oracle 语义：NULL 与 NULL 视为相等，由 IS NOT DISTINCT FROM 承载；
+   * 无缺省分支回落 NULL；元数 ≥3 的任意形态均可改写，否则原样保留交由校验器报错）。 */
+  private static SqlNode rewriteDecode(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() < 3) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlNode target = ops.get(0);
+    SqlNodeList whens = new SqlNodeList(pos);
+    SqlNodeList thens = new SqlNodeList(pos);
+    for (int i = 1; i + 1 < ops.size(); i += 2) {
+      whens.add(new SqlBasicCall(SqlStdOperatorTable.IS_NOT_DISTINCT_FROM,
+          List.of(target, ops.get(i)), pos));
+      thens.add(ops.get(i + 1));
+    }
+    SqlNode elseNode = ops.size() % 2 == 0
+        ? ops.get(ops.size() - 1)        // 末位缺省分支
+        : SqlLiteral.createNull(pos);    // 无缺省回落 NULL
+    return new SqlCase(pos, null, whens, thens, elseNode);
   }
 
   /** GREATEST/LEAST(a, b, ...) → 按元数挂载对应本地 UDF（跳过 NULL 取极值）。 */

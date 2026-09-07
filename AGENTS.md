@@ -15,7 +15,7 @@ virtual threads).
   - `AntiBindJoinFilterRule` (+ `AntiBindJoinRule` for calc-shaped trees) — rewrites decorrelated `NOT EXISTS` (LEFT join + constant marker `IS NULL`) into ANTI Bind Join, and `EXISTS` marker forms into SEMI; rejects user-written real-column `IS [NOT] NULL` filters via the constant-marker check
   - `ShardTopNRule` — pushes ORDER BY + LIMIT into every branch of a cross-DB UNION ALL (each source returns offset+fetch rows; local merge keeps semantics)
   - `MultiArgCountRule` — rewrites MySQL-style multi-arg `COUNT(a, b)` into portable `COUNT(CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN 1 END)` so it can push down
-  - `SqlRewrites` — parse-stage (pre-validation) semantic-preserving rewrites for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` → local UDF/UDAF implementations. Unsafe forms are left untouched for the validator
+  - `SqlRewrites` — parse-stage (pre-validation) semantic-preserving rewrites for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` → local UDF/UDAF implementations, `DECODE` → `CASE WHEN … IS NOT DISTINCT FROM` (Oracle NULL=NULL equality), `LEFT SEMI/ANTI JOIN` → equivalent `CROSS APPLY (SELECT 1 … HAVING COUNT(*) …)`, `FETCH FIRST n ROWS WITH TIES` → first-n-distinct-keys `IN` semi-join (bare-column keys only). Unsafe forms are left untouched for the validator
   - `CrossDbFunctions` — local scalar UDF implementations registered by `SqlRewrites` (three-valued NULL logic); keeps behavior identical regardless of which source DB evaluates what
   - `CrossDbAggregates` — local aggregate/window UDAF implementations (`CROSSDB_LISTAGG` distinct-listagg, `CROSSDB_MEDIAN`, `CROSSDB_PERCENTILE_CONT`, `CROSSDB_NTH_VALUE2/3/4` frame-aware nth-value) + `TIMESTAMPDIFF` evaluation; wired in by `SqlRewrites`
   - `EnumerableBindJoin` (Calcite physical rel) + `BindJoinExec` (streaming runtime; SEMI/ANTI both pass `semi=true`, ANTI additionally `anti=true`)
@@ -32,7 +32,7 @@ virtual threads).
 ## Commands
 
 ```bash
-mvn test                                                    # all JUnit 5 tests, both modules (441; 4 @Disabled("待支持: …") compatibility cases skip by design)
+mvn test                                                    # all JUnit 5 tests, both modules (565; 6 @Disabled("待支持: …") compatibility cases skip by design)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 # run with -DargLine="-Duser.timezone=UTC" on a non-UTC machine: TIMESTAMP values
@@ -48,10 +48,10 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
   up new H2 instances.
 - `crossdb-core` must stay Spring-free; only the starter module touches Spring.
 - Features not yet supported are covered by tests marked `@Disabled("待支持: …")`
-  (currently 4, in `CrossDbCoverageTest`) — they are the tracked fix backlog. Keep the
+  (currently 6, in `CrossDbComprehensiveTest`) — they are the tracked fix backlog. Keep the
   assertions at standard semantics; fix the engine and re-enable rather than deleting
-  or weakening them. The former 8-case `待支持/待修复` backlog in
-  `CrossDbCompatibilityTest` / `CrossDbExtensionsTest` was fixed and re-enabled.
+  or weakening them. The former 4-case backlog in `CrossDbCoverageTest` (EXISTS+HAVING
+  聚合、FETCH FIRST … WITH TIES、DECODE、LEFT SEMI JOIN) was fixed and re-enabled.
 
 ## Gotchas
 

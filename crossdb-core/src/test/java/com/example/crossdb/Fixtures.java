@@ -42,6 +42,36 @@ final class Fixtures {
         (2, 9, 'b', NULL, NULL, NULL),
         (3, NULL, NULL, 3.5, TIMESTAMP '2026-02-03 04:05:06', FALSE);
       """);
+  /** 商品域夹具：纯 DATE 列（epoch days 承载）、可命中的区域维度链与 NULL 外键/度量：
+   * regions 9 无商品（右未匹配）、products 13 外键/价格/日期全 NULL、shipments 103 无区域。 */
+  static final JdbcDataSource GOODS = init("goods", """
+      CREATE TABLE IF NOT EXISTS regions(region_id INT PRIMARY KEY, name VARCHAR(20));
+      CREATE TABLE IF NOT EXISTS products(id INT PRIMARY KEY, region_id INT, name VARCHAR(20),
+        price DECIMAL(10,2), made DATE, active BOOLEAN);
+      CREATE TABLE IF NOT EXISTS shipments(order_id INT PRIMARY KEY, region_id INT, shipped DATE);
+      INSERT INTO regions VALUES (1,'north'),(2,'south'),(9,'west');
+      INSERT INTO products VALUES
+        (10, 1, 'desk', 99.90, DATE '2026-01-15', TRUE),
+        (11, 1, 'chair', 49.50, DATE '2026-02-20', FALSE),
+        (12, 2, 'lamp', 25.00, DATE '2026-03-10', TRUE),
+        (13, NULL, 'box', NULL, NULL, NULL);
+      INSERT INTO shipments VALUES
+        (100, 1, DATE '2026-01-20'),
+        (101, 2, DATE '2026-01-25'),
+        (102, 1, NULL),
+        (103, NULL, DATE '2026-02-01');
+      """);
+  /** 日志域夹具：每用户多行时间序列（TIMESTAMP + 分级标签），窗口/间隔/条件聚合场景；
+   * log 4 的 user_id 为 NULL（NULL key 边界）。 */
+  static final JdbcDataSource LOGS = init("logs", """
+      CREATE TABLE IF NOT EXISTS logs(id INT PRIMARY KEY, user_id INT, ts TIMESTAMP,
+        level VARCHAR(10), message VARCHAR(50));
+      INSERT INTO logs VALUES
+        (1, 1, TIMESTAMP '2026-01-02 03:04:05', 'INFO', 'start'),
+        (2, 1, TIMESTAMP '2026-01-02 03:10:00', 'WARN', 'slow'),
+        (3, 2, TIMESTAMP '2026-01-03 09:00:00', 'INFO', 'ok'),
+        (4, NULL, TIMESTAMP '2026-01-03 09:30:00', 'ERROR', 'boom');
+      """);
 
   private Fixtures() {}
 

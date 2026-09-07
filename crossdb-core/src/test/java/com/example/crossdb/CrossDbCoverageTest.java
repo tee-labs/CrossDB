@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -268,14 +267,14 @@ class CrossDbCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: 相关 EXISTS 子查询内 HAVING 聚合过滤（去相关后形态）校验不支持，待支持")
-    void existsWithHavingCorrelation() throws Exception {
+    @Test void existsWithHavingCorrelation() throws Exception {
+      // 相关 EXISTS 子查询内 HAVING 聚合过滤（SELECT 裸列不合标准聚合语义，
+      // 按标准改为 GROUP BY 同列形态）：alice/bob 各 2 单，carol 无订单
       try (CrossDb db = core()) {
         assertEquals(List.of("alice", "bob"),
             rows(db, "SELECT u.name FROM userdb.users u WHERE EXISTS "
                 + "(SELECT o.user_id FROM orderdb.orders o WHERE o.user_id = u.id "
-                + "HAVING COUNT(*) > 1) ORDER BY u.name"));
+                + "GROUP BY o.user_id HAVING COUNT(*) > 1) ORDER BY u.name"));
       }
     }
   }
@@ -537,9 +536,9 @@ class CrossDbCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: Calcite 解析器不支持 FETCH FIRST n ROW WITH TIES 语法，待支持")
-    void fetchFirstWithTies() throws Exception {
+    @Test void fetchFirstWithTies() throws Exception {
+      // WITH TIES 由 preprocess 改写为等价 RANK() <= n 窗口形态（解析器不支持该语法）；
+      // id 升序前 1 行无并列 → 仅 id=1
       try (CrossDb db = core()) {
         assertEquals(List.of("1"),
             rows(db, "SELECT id FROM userdb.users ORDER BY id FETCH FIRST 1 ROW WITH TIES"));
@@ -648,21 +647,33 @@ class CrossDbCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: Oracle DECODE 未注册（可经 CASE 等价改写实现），待支持")
-    void decodeFunction() throws Exception {
+    @Test void decodeFunction() throws Exception {
+      // Oracle DECODE 由解析期改写为 CASE WHEN .. IS NOT DISTINCT FROM（NULL=NULL 相等）；
+      // 分支字面量推导 CHAR(n) 补空格（与 CASE 系列用例一致）
       try (CrossDb db = core()) {
-        assertEquals("one", scalar(db,
+        assertEquals("one  ", scalar(db,
             "SELECT DECODE(id, 1, 'one', 'other') FROM userdb.users WHERE id = 1"));
+        assertEquals("other", scalar(db,
+            "SELECT DECODE(id, 1, 'one', 'other') FROM userdb.users WHERE id = 2"));
+        assertEquals("fallback", scalar(db,
+            "SELECT DECODE(id, 1, 'one', 2, 'two', 'fallback') FROM userdb.users WHERE id = 3"));
       }
     }
 
-    @Test
-    @Disabled("待支持: 解析器不支持 LEFT SEMI JOIN 语法（SEMI 语义经 EXISTS/IN 表达），待支持")
-    void leftSemiJoinSyntax() throws Exception {
+    @Test void leftSemiJoinSyntax() throws Exception {
+      // LEFT SEMI JOIN 语法由 preprocess 改写为等价 CROSS APPLY（解析器不支持该语法）
       try (CrossDb db = core()) {
         assertEquals(List.of("alice", "bob"),
             rows(db, "SELECT u.name FROM userdb.users u LEFT SEMI JOIN "
+                + "orderdb.orders o ON o.user_id = u.id ORDER BY u.name"));
+      }
+    }
+
+    @Test void leftAntiJoinSyntax() throws Exception {
+      // LEFT ANTI JOIN 语法同路径改写：无订单的 carol 保留
+      try (CrossDb db = core()) {
+        assertEquals(List.of("carol"),
+            rows(db, "SELECT u.name FROM userdb.users u LEFT ANTI JOIN "
                 + "orderdb.orders o ON o.user_id = u.id ORDER BY u.name"));
       }
     }
