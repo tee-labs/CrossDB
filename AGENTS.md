@@ -14,8 +14,12 @@ virtual threads).
   - `BindJoinRule`, `TopNBindJoinRule` — planner rules rewriting cross-DB joins into batched IN-pushdown (Bind Join)
   - `AntiBindJoinFilterRule` (+ `AntiBindJoinRule` for calc-shaped trees) — rewrites decorrelated `NOT EXISTS` (LEFT join + constant marker `IS NULL`) into ANTI Bind Join, and `EXISTS` marker forms into SEMI; rejects user-written real-column `IS [NOT] NULL` filters via the constant-marker check
   - `ShardTopNRule` — pushes ORDER BY + LIMIT into every branch of a cross-DB UNION ALL (each source returns offset+fetch rows; local merge keeps semantics)
+  - `MultiArgCountRule` — rewrites MySQL-style multi-arg `COUNT(a, b)` into portable `COUNT(CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN 1 END)` so it can push down
+  - `SqlRewrites` — parse-stage (pre-validation) semantic-preserving rewrites for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` / `NTH_VALUE` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites. Unsafe forms are left untouched for the validator
+  - `CrossDbFunctions` — the local UDF implementations registered by `SqlRewrites` (three-valued NULL logic); keeps behavior identical regardless of which source DB evaluates what
   - `EnumerableBindJoin` (Calcite physical rel) + `BindJoinExec` (streaming runtime; SEMI/ANTI both pass `semi=true`, ANTI additionally `anti=true`)
   - `Guarded` — DataSource proxy enforcing fetchSize, row-limit breaker, queryTimeout, statement cancel registry
+  - `Stats` — per-query execution stats (SQL actually sent per source, rows pulled, Bind Join batches); exposed via `analyze()`
   - `Main` — end-to-end self-check runner
 - `crossdb-spring-boot-starter/` (package `com.example.crossdb.spring`) — Spring Boot 3.x
   autoconfig: `CrossDbProperties` (`crossdb.*` props), `CrossDbCustomizer` (register DataSources),
@@ -27,7 +31,7 @@ virtual threads).
 ## Commands
 
 ```bash
-mvn test                                                    # all 259 JUnit 5 tests (both modules)
+mvn test                                                    # all JUnit 5 tests, both modules (~360; a few @Disabled compatibility cases skip by design)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 ```
@@ -40,6 +44,10 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
   (per-JVM init, read-only data). Add new fixture tables there instead of spinning
   up new H2 instances.
 - `crossdb-core` must stay Spring-free; only the starter module touches Spring.
+- Features not yet supported are covered by tests marked `@Disabled("待支持: …")` or
+  `@Disabled("待修复: …")` (mostly in `CrossDbCompatibilityTest` / `CrossDbExtensionsTest`) —
+  they are the tracked fix backlog. Keep the assertions at standard semantics; fix the
+  engine and re-enable rather than deleting or weakening them.
 
 ## Gotchas
 
