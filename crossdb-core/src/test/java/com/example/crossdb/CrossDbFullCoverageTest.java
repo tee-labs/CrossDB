@@ -321,10 +321,7 @@ class CrossDbFullCoverageTest {
   @DisplayName("窗口扩展场景")
   class Windows2 {
 
-    @Test
-    @Disabled("待支持: 解析器不支持 GROUPS 帧关键字（SQL:2011）；等价改写需把窗口"
-        + " ORDER BY 换成派生表 DENSE_RANK 分组列再转 RANGE 帧，待支持")
-    void groupsFrameCountsPeerGroups() throws Exception {
+    @Test void groupsFrameCountsPeerGroups() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("100,10", "101,30", "102,25", "103,6"), rows(db,
             "SELECT id, SUM(amount) OVER (ORDER BY id GROUPS BETWEEN 1 PRECEDING "

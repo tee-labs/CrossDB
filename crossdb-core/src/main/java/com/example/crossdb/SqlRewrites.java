@@ -152,6 +152,59 @@ final class SqlRewrites {
       udf("CROSSDB_TRANSLATE", "translate",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.STRING),
           SqlTypeName.VARCHAR, ARG0_NULLABLE);
+  /** LEFT/RIGHT(s, n)（MySQL/SQL Server 方言）→ 本地实现（操作数 ANY 混合承载）。 */
+  private static final SqlUserDefinedFunction LEFT_FN =
+      udf("CROSSDB_LEFT", "left", List.of(SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  private static final SqlUserDefinedFunction RIGHT_FN =
+      udf("CROSSDB_RIGHT", "right", List.of(SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  /** LOCATE(substr, str[, start])（MySQL/PostgreSQL 方言）→ 本地实现。 */
+  // 按元数异名（同 GREATEST/LEAST 先例）：同名双元数会在校验器按名重查时触发
+  // ANY 类型优先级断言（SqlTypeExplicitPrecedenceList）
+  private static final SqlUserDefinedFunction LOCATE2_FN =
+      udf("CROSSDB_LOCATE2", "locate2", List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING),
+          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction LOCATE3_FN =
+      udf("CROSSDB_LOCATE3", "locate3",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+  /** MOD 浮点语义修正（仅浮点操作数改写挂载；整数走原生 MOD 保下推）。 */
+  private static final SqlUserDefinedFunction MOD_FN =
+      udf("CROSSDB_MOD", "mod", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ReturnTypes.DOUBLE_NULLABLE);
+  /** DIV 整除（MySQL 操作符改写目标）。 */
+  private static final SqlUserDefinedFunction IDIV_FN =
+      udf("CROSSDB_IDIV", "idiv", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+  /** Oracle 日期函数：本地实现（H2 亦同名可下推；ADD_MONTHS 返回类型随首参 DATE）。 */
+  private static final SqlUserDefinedFunction ADD_MONTHS_FN =
+      udf("ADD_MONTHS", "addMonths", List.of(SqlTypeFamily.ANY, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  private static final SqlUserDefinedFunction MONTHS_BETWEEN_FN =
+      udf("MONTHS_BETWEEN", "monthsBetween", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, new SqlTypeTransformCascade(
+              b -> b.getTypeFactory().createSqlType(SqlTypeName.DECIMAL),
+              SqlTypeTransforms.TO_NULLABLE));
+  /** 位运算族（& | ^ ~ << >> 操作符改写目标，MySQL/PostgreSQL）。 */
+  private static final SqlUserDefinedFunction BITAND_FN =
+      udf("CROSSDB_BITAND", "bitAnd", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction BITOR_FN =
+      udf("CROSSDB_BITOR", "bitOr", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction BITXOR_FN =
+      udf("CROSSDB_BITXOR", "bitXor", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction BITNOT_FN =
+      udf("CROSSDB_BITNOT", "bitNot", List.of(SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction SHL_FN =
+      udf("CROSSDB_SHL", "shl", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+  private static final SqlUserDefinedFunction SHR_FN =
+      udf("CROSSDB_SHR", "shr", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
+          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
 
   private static final SqlUserDefinedAggFunction LISTAGG_DISTINCT_FN =
       aggFn("CROSSDB_LISTAGG", VARCHAR_NULLABLE,
@@ -218,6 +271,13 @@ final class SqlRewrites {
         AggregateFunctionImpl.create(impl), false, false, Optionality.IGNORED);
   }
 
+  /** REPEAT / CHR：SPACE→REPEAT、CHAR→CHR 改写挂载目标（亦作 SQL 可见函数）。 */
+  static final SqlUserDefinedFunction REPEAT_FN =
+      udf("REPEAT", "repeat",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC), SqlTypeName.VARCHAR, ARG0_NULLABLE);
+  static final SqlUserDefinedFunction CHR_FN =
+      udf("CHR", "chr", List.of(SqlTypeFamily.NUMERIC), SqlTypeName.VARCHAR, VARCHAR_NULLABLE);
+
   /** 注册进引擎操作符表的本地函数（名字即 SQL 可见名；与标准表无同名冲突）。
    * 注意：解析期改写「按名挂载」的操作符（INITCAP/GREATEST/LEAST/NTH_VALUE 等）
    * 同样必须在此注册——校验器对已挂载的函数调用仍会按名重查操作符表。 */
@@ -229,9 +289,8 @@ final class SqlRewrites {
       udf("RPAD", "rpad",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC, SqlTypeFamily.STRING),
           SqlTypeName.VARCHAR, ARG0_NULLABLE),
-      udf("REPEAT", "repeat",
-          List.of(SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC), SqlTypeName.VARCHAR, ARG0_NULLABLE),
-      udf("CHR", "chr", List.of(SqlTypeFamily.NUMERIC), SqlTypeName.VARCHAR, VARCHAR_NULLABLE),
+      REPEAT_FN,
+      CHR_FN,
       udf("NVL", "nvl", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY), SqlTypeName.ANY, ARG0_NULLABLE),
       udf("CONCAT", "concat2", List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING),
           SqlTypeName.VARCHAR, ARG0_NULLABLE),
@@ -251,7 +310,10 @@ final class SqlRewrites {
       FLOOR_UNIT_FN, CEIL_UNIT_FN, OVERLAY_FN_3, OVERLAY_FN_4, INITCAP_FN,
       SIMILAR_FN_2, SIMILAR_FN_3, REGEXP_FN,
       GREATEST2, GREATEST3, GREATEST4, LEAST2, LEAST3, LEAST4,
-      TIMESTAMPDIFF_FN);
+      TIMESTAMPDIFF_FN,
+      LEFT_FN, RIGHT_FN, LOCATE2_FN, LOCATE3_FN, MOD_FN, IDIV_FN,
+      ADD_MONTHS_FN, MONTHS_BETWEEN_FN,
+      BITAND_FN, BITOR_FN, BITXOR_FN, BITNOT_FN, SHL_FN, SHR_FN);
   /** 全部本地操作符（标量 UDF + 聚合/窗口 UDAF）：注册进引擎操作符表。 */
   static final List<org.apache.calcite.sql.SqlOperator> OPERATORS;
   static {
@@ -314,6 +376,14 @@ final class SqlRewrites {
       case "reverse" -> new Class<?>[]{String.class};
       case "translate" -> new Class<?>[]{String.class, String.class, String.class};
       case "soundex", "ltrim", "rtrim" -> new Class<?>[]{String.class};
+      case "left", "right" -> new Class<?>[]{String.class, BigDecimal.class};
+      case "locate2" -> new Class<?>[]{String.class, String.class};
+      case "locate3" -> new Class<?>[]{String.class, String.class, BigDecimal.class};
+      case "mod", "idiv" -> new Class<?>[]{Object.class, Object.class};
+      case "addMonths" -> new Class<?>[]{Object.class, BigDecimal.class};
+      case "monthsBetween" -> new Class<?>[]{Object.class, Object.class};
+      case "bitAnd", "bitOr", "bitXor", "shl", "shr" -> new Class<?>[]{Long.class, Long.class};
+      case "bitNot" -> new Class<?>[]{Long.class};
       default -> {
         if (impl.startsWith("greatest") || impl.startsWith("least")) {
           yield nOf(Object.class, arity);
@@ -364,8 +434,8 @@ final class SqlRewrites {
       "OUTER", "NATURAL", "ON", "APPLY");
 
   /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES /
-   * LISTAGG ON OVERFLOW ERROR / REGEXP / 语句尾分号剥离。各改写仅在能安全识别
-   * 边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
+   * LISTAGG ON OVERFLOW ERROR / REGEXP / STRAIGHT_JOIN / 语句尾分号剥离。各改写仅在
+   * 能安全识别边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
   static String preprocess(String sql) {
     sql = preprocessTrailingSemicolon(sql);
     sql = preprocessTop(sql);
@@ -373,6 +443,10 @@ final class SqlRewrites {
     sql = preprocessFetchWithTies(sql);
     sql = preprocessListaggOverflowError(sql);
     sql = preprocessRegexp(sql);
+    sql = preprocessStraightJoin(sql);
+    sql = preprocessFetchPercent(sql);
+    sql = preprocessGroupsFrame(sql);
+    sql = preprocessBitwiseDiv(sql);
     return sql;
   }
 
@@ -407,6 +481,852 @@ final class SqlRewrites {
   }
 
   private static final Pattern REGEXP_OPERATOR = Pattern.compile("(?i)\\bREGEXP\\b");
+
+  private static final Pattern STRAIGHT_SELECT =
+      Pattern.compile("(?i)\\bSELECT\\s+STRAIGHT_JOIN\\b");
+  private static final Pattern STRAIGHT_JOIN_KW =
+      Pattern.compile("(?i)\\bSTRAIGHT_JOIN\\b");
+
+  /** MySQL STRAIGHT_JOIN（Calcite 解析器不支持）：语句级 {@code SELECT STRAIGHT_JOIN}
+   * 为查询提示 → 剥离提示字；连接级 STRAIGHT_JOIN ≡ INNER JOIN（连接顺序提示，
+   * 语义不变）→ JOIN。字面量/注释内的伪命中不动。 */
+  private static String preprocessStraightJoin(String sql) {
+    if (!STRAIGHT_JOIN_KW.matcher(sql).find()) {
+      return sql;
+    }
+    String out = replaceLiveMatches(sql, STRAIGHT_SELECT, "SELECT");
+    return replaceLiveMatches(out, STRAIGHT_JOIN_KW, "JOIN");
+  }
+
+  /** 活字符命中的正则替换为固定串（字面量/注释内不动）。 */
+  private static String replaceLiveMatches(String sql, Pattern pattern, String replacement) {
+    Matcher m = pattern.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    boolean[] live = liveMask(sql);
+    StringBuilder out = new StringBuilder(sql.length());
+    int pos = 0;
+    m.reset();
+    while (m.find()) {
+      if (!spanLive(live, m.start(), m.end())) {
+        continue;   // 字面量/注释内的伪命中
+      }
+      out.append(sql, pos, m.start()).append(replacement);
+      pos = m.end();
+    }
+    if (pos == 0) {
+      return sql;
+    }
+    return out.append(sql.substring(pos)).toString();
+  }
+
+  // ---------- GROUPS 窗口帧等价改写（SQL:2011） ----------
+
+  /** GROUPS 帧（SQL:2011，Calcite 解析器不支持该关键字）→ 等价 DENSE_RANK 改写：
+   * GROUPS 按「对等组（peer group）」计数，恰为 DENSE_RANK 编号上的 RANGE 数值
+   * 偏移——把 FROM 包一层派生表追加 {@code DENSE_RANK() OVER ([PARTITION BY ..]
+   * ORDER BY 原键) AS crossdb_grp}，窗口改为 {@code ORDER BY crossdb_grp RANGE
+   * 同边界}（grp 沿原键序递增，RANGE 偏移即组偏移，数学等价；EXCLUDE 子句原样
+   * 兼容）。边界：平铺单表（含派生表）SELECT + WHERE；所有 GROUPS 窗口须共用
+   * 同一 PARTITION/ORDER 签名（排序键为裸列，可带限定符）；顶层集合操作 /
+   * GROUP BY / HAVING / DISTINCT / 多表 FROM 不改写。无法安全改写时原样保留
+   * 交解析器报真实错误。 */
+  private static String preprocessGroupsFrame(String sql) {
+    boolean[] live = liveMask(sql);
+    List<int[]> occ = new ArrayList<>();
+    collectLiveWord(sql, live, "GROUPS", occ);
+    if (occ.isEmpty()) {
+      return sql;
+    }
+    if (hasTopLevelAny(sql, live, sql.length(), "UNION", "INTERSECT", "EXCEPT",
+        "GROUP", "HAVING")) {
+      return sql;
+    }
+    // 解析每处 GROUPS 窗口：定位其 ORDER BY 与可选 PARTITION BY，校验签名一致
+    List<int[]> spans = new ArrayList<>();   // {orderStart, groupsEnd}，倒序替换
+    List<String> keys = null;
+    List<String> dirs = null;
+    String partition = null;
+    for (int[] g : occ) {
+      int orderStart = lastKeywordBefore(sql, live, g[0], "ORDER BY");
+      if (orderStart < 0) {
+        return sql;
+      }
+      int keysStart = orderStart + "ORDER BY".length();
+      List<String> ks = new ArrayList<>();
+      List<String> ds = new ArrayList<>();
+      if (!parseOrderKeys(sql.substring(keysStart, g[0]).trim(), ks, ds)) {
+        return sql;
+      }
+      // 窗口内 ORDER BY 之前只允许 PARTITION BY 子句
+      int over = lastKeywordBefore(sql, live, orderStart, "OVER");
+      if (over < 0 || skipBlank(sql, live, over + 4) >= sql.length()
+          || sql.charAt(skipBlank(sql, live, over + 4)) != '(') {
+        return sql;
+      }
+      int specStart = skipBlank(sql, live, over + 4) + 1;
+      String before = sql.substring(specStart, orderStart).trim();
+      String part;
+      if (before.isEmpty()) {
+        part = "";
+      } else if (before.toUpperCase().matches("(?s)^PARTITION\\s+BY\\s+.*")) {
+        part = before.replaceFirst("(?is)^PARTITION\\s+BY\\s+", "").trim();
+      } else {
+        return sql;
+      }
+      if (keys == null) {
+        keys = ks;
+        dirs = ds;
+        partition = part;
+      } else if (!String.join(",", keys).equalsIgnoreCase(String.join(",", ks))
+          || !String.join(",", dirs).equalsIgnoreCase(String.join(",", ds))
+          || !partition.equalsIgnoreCase(part)) {
+        return sql;   // 多窗口签名不一致：一个 grp 列无法共享
+      }
+      spans.add(new int[]{orderStart, g[1]});
+    }
+    // 倒序替换各窗口：ORDER BY <keys> GROUPS → ORDER BY crossdb_grp RANGE
+    for (int s = spans.size() - 1; s >= 0; s--) {
+      int[] span = spans.get(s);
+      sql = sql.substring(0, span[0]) + "ORDER BY crossdb_grp RANGE"
+          + sql.substring(span[1]);
+    }
+    // 替换后重扫 FROM 与单表 FROM 项（替换改变后续位置）
+    live = liveMask(sql);
+    if (!sql.trim().toUpperCase().startsWith("SELECT")
+        || sql.trim().toUpperCase().matches("(?is)^SELECT\\s+DISTINCT\\b.*")) {
+      return sql;
+    }
+    int fromIdx = topLevelFrom(sql, live, sql.length());
+    if (fromIdx < 0) {
+      return sql;
+    }
+    int n = sql.length();
+    int i = skipBlank(sql, live, fromIdx + 4);
+    if (i >= n || !live[i]) {
+      return sql;
+    }
+    if (sql.charAt(i) == '(') {
+      int end = matchParen(sql, live, i);
+      if (end < 0) {
+        return sql;
+      }
+      i = end;
+    } else {
+      if (!isIdentStart(sql.charAt(i))) {
+        return sql;
+      }
+      while (i < n && live[i] && (isIdentPart(sql.charAt(i)) || sql.charAt(i) == '.')) {
+        i++;
+      }
+    }
+    String alias = null;
+    int a = skipBlank(sql, live, i);
+    if (a < n && live[a] && isIdentStart(sql.charAt(a))) {
+      String w = wordAt(sql, a).toUpperCase();
+      if (w.equals("AS")) {
+        int b = skipBlank(sql, live, a + 2);
+        if (b < n && live[b] && isIdentStart(sql.charAt(b))
+            && !CLAUSE_STOPPERS.contains(wordAt(sql, b).toUpperCase())) {
+          alias = wordAt(sql, b);
+          i = b + alias.length();
+        } else {
+          return sql;
+        }
+      } else if (!CLAUSE_STOPPERS.contains(w)) {
+        alias = wordAt(sql, a);
+        i = a + alias.length();
+      }
+    }
+    int itemEnd = skipBlank(sql, live, i);
+    if (itemEnd < n && live[itemEnd]) {
+      char c = sql.charAt(itemEnd);
+      if (c == ',' || c == '(' || !isIdentStart(c)
+          || !(CLAUSE_STOPPERS.contains(wordAt(sql, itemEnd).toUpperCase())
+              || wordAt(sql, itemEnd).equalsIgnoreCase("WINDOW"))) {
+        return sql;   // JOIN 家族 / 多表 / 未预期形态
+      }
+    }
+    String fromItem = sql.substring(fromIdx + 4, Math.min(itemEnd, n)).trim();
+    if (alias == null) {
+      if (fromItem.startsWith("(")) {
+        return sql;   // 无别名派生表无法在包裹层限定列
+      }
+      alias = fromItem.substring(fromItem.lastIndexOf('.') + 1).trim();
+    }
+    String orderList = "";
+    for (int k = 0; k < keys.size(); k++) {
+      orderList += (k > 0 ? ", " : "") + keys.get(k) + " " + dirs.get(k);
+    }
+    String denseRank = "DENSE_RANK() OVER ("
+        + (partition == null || partition.isEmpty() ? ""
+            : "PARTITION BY " + partition + " ")
+        + "ORDER BY " + orderList + ")";
+    String wrapped = "(SELECT " + alias + ".*, " + denseRank
+        + " AS crossdb_grp FROM " + fromItem + ") " + alias;
+    return sql.substring(0, fromIdx + 4) + " " + wrapped
+        + (itemEnd < n ? " " + sql.substring(itemEnd) : "");
+  }
+
+  /** 收集活字符词 word 的全部出现 {start, end}。 */
+  private static void collectLiveWord(String sql, boolean[] live, String word,
+      List<int[]> out) {
+    int n = sql.length();
+    for (int i = 0; i < n; i++) {
+      if ((wordEquals(sql, i, word) || wordEquals(sql, i, word.toLowerCase()))
+          && isWordStart(sql, live, i) && isWordEnd(sql, live, i + word.length())
+          && spanLive(live, i, i + word.length())) {
+        out.add(new int[]{i, i + word.length()});
+        i += word.length() - 1;
+      }
+    }
+  }
+
+  /** limit 前最后一个词关键字（如 "ORDER BY"/"OVER"）的起点；无则 -1。 */
+  private static int lastKeywordBefore(String sql, boolean[] live, int limit,
+      String keyword) {
+    String[] words = keyword.toUpperCase().split("\\s+");
+    int best = -1;
+    int n = Math.min(limit, sql.length());
+    for (int i = 0; i < n; i++) {
+      if (!live[i] || !isIdentStart(sql.charAt(i))) {
+        continue;
+      }
+      if (keywordAt(sql, live, i, keyword)) {
+        best = i;
+        i += words[0].length() - 1;
+      } else {
+        String w = wordAt(sql, i);
+        i += w.length() - 1;
+      }
+    }
+    return best;
+  }
+
+  // ---------- 位运算 / DIV 操作符文本改写（MySQL / PostgreSQL） ----------
+
+  private static final Pattern FETCH_PERCENT = Pattern.compile(
+      "(?i)\\bFETCH\\s+(?:FIRST|NEXT)\\s+(\\d+(?:\\.\\d+)?)\\s+PERCENT\\s+ROWS?\\s+ONLY\\s*(;?)\\s*$");
+
+  /** FETCH FIRST n PERCENT ROWS ONLY（SQL:2008 扩展，Calcite 解析器不支持）→
+   * 等价改写：按标准语义取「前 CEILING(n% × 总行数) 行」——
+   * {@code SELECT <原输出列> FROM (SELECT <原清单>[, 缺失排序键],
+   * ROW_NUMBER() OVER (ORDER BY 原键) AS crossdb_pct_rn, COUNT(*) OVER () AS
+   * crossdb_pct_cnt FROM 原FROM..) WHERE crossdb_pct_rn <= CEILING(cnt * n / 100.0)
+   * ORDER BY crossdb_pct_rn}（行号序即键序，无列泄漏；无 ORDER BY 时行选择任意，
+   * 与标准一致）。边界：仅语句级平铺 SELECT（顶层集合操作/DISTINCT/OFFSET 不改
+   * 写）；排序键须为（可带限定符的）裸列；输出列名可推导（* / t.* 不支持）。
+   * 无法安全改写时原样保留交解析器报真实错误。 */
+  private static String preprocessFetchPercent(String sql) {
+    Matcher m = FETCH_PERCENT.matcher(sql);
+    if (!m.find()) {
+      return sql;
+    }
+    boolean[] live = liveMask(sql);
+    int fetchStart = m.start();
+    int[] orderBy = lastTopLevelOrderBy(sql, live, fetchStart);
+    List<String> keys = new ArrayList<>();
+    List<String> dirs = new ArrayList<>();
+    boolean hasOrder = orderBy != null;
+    if (hasOrder && !parseOrderKeys(sql.substring(orderBy[1], fetchStart).trim(),
+        keys, dirs)) {
+      return sql;
+    }
+    String core = sql.substring(0, hasOrder ? orderBy[0] : fetchStart);
+    if (!hasOrder && hasTopLevelAny(sql, live, core.length(),
+        "ORDER", "OFFSET", "UNION", "INTERSECT", "EXCEPT")) {
+      return sql;   // ORDER BY 存在但夹有 OFFSET 等，或顶层集合操作
+    }
+    int fromIdx = topLevelFrom(sql, live, core.length());
+    if (fromIdx < 0) {
+      return sql;
+    }
+    String head = sql.substring(0, fromIdx);
+    if (head.matches("(?is)^\\s*SELECT\\s+DISTINCT\\b.*")
+        || head.matches("(?is)^\\s*SELECT\\s+ALL\\b.*")) {
+      return sql;   // DISTINCT 与窗口函数组合的命名推导复杂，不改写
+    }
+    java.util.regex.Matcher selM = java.util.regex.Pattern.compile(
+        "(?is)^\\s*SELECT\\s+").matcher(head);
+    if (!selM.find()) {
+      return sql;
+    }
+    int listStart = selM.end();
+    String listText = head.substring(listStart).stripTrailing();
+    String fromTail = sql.substring(fromIdx, core.length()).trim();
+    List<String> items = splitTopLevel(listText, live, listStart);
+    if (items == null) {
+      return sql;
+    }
+    List<String> names = new ArrayList<>();
+    for (int i = 0; i < items.size(); i++) {
+      String name = outputColumnName(items.get(i), i);
+      if (name == null) {
+        return sql;   // * / t.* 等无法文本推导输出列名
+      }
+      names.add(name);
+    }
+    List<String> appendedKeys = new ArrayList<>();
+    for (String key : keys) {
+      boolean inList = names.stream().anyMatch(n -> n.equalsIgnoreCase(key));
+      if (!inList) {
+        appendedKeys.add(key);
+      }
+    }
+    StringBuilder inner = new StringBuilder("SELECT ").append(listText);
+    for (String key : appendedKeys) {
+      inner.append(", ").append(key);
+    }
+    inner.append(", ROW_NUMBER() OVER (");
+    if (!keys.isEmpty()) {
+      inner.append("ORDER BY ");
+    }
+    for (int i = 0; i < keys.size(); i++) {
+      inner.append(i > 0 ? ", " : "").append(keys.get(i)).append(' ').append(dirs.get(i));
+    }
+    inner.append(") AS crossdb_pct_rn, COUNT(*) OVER () AS crossdb_pct_cnt ")
+        .append(fromTail);
+    String where = "crossdb_pct_rn <= CEILING(crossdb_pct_cnt * " + m.group(1)
+        + " / 100.0)";
+    String suffix = m.group(2);
+    return "SELECT " + String.join(", ", names) + " FROM (" + inner
+        + ") crossdb_pct_row WHERE " + where
+        + (hasOrder ? " ORDER BY crossdb_pct_rn" : "") + suffix;
+  }
+
+  /** limit 前是否存在深度 0 的指定关键字之一。 */
+  private static boolean hasTopLevelAny(String sql, boolean[] live, int limit,
+      String... words) {
+    int depth = 0;
+    int prevLive = -1;
+    for (int i = 0; i < limit; i++) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (depth == 0 && isIdentStart(c) && prevLive != '.') {
+        String upper = wordAt(sql, i).toUpperCase();
+        for (String w : words) {
+          if (upper.equals(w)) {
+            return true;
+          }
+        }
+        i += upper.length() - 1;
+      }
+      if (!Character.isWhitespace(c)) {
+        prevLive = c;
+      }
+    }
+    return false;
+  }
+
+  /** limit 前最后一个深度 0 的 FROM 关键字位置（-1 表示无）。 */
+  private static int topLevelFrom(String sql, boolean[] live, int limit) {
+    int depth = 0;
+    int found = -1;
+    int prevLive = -1;
+    for (int i = 0; i < limit; i++) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (depth == 0 && isIdentStart(c) && prevLive != '.') {
+        String upper = wordAt(sql, i).toUpperCase();
+        if (upper.equals("FROM")) {
+          found = i;
+        }
+        i += upper.length() - 1;
+      }
+      if (!Character.isWhitespace(c)) {
+        prevLive = c;
+      }
+    }
+    return found;
+  }
+
+  /** 深度 0 逗号切分 select 清单；baseOffset 为片段在原语句中的起点偏移
+   * （用于复用原语句掩码）。返回各项（保留原文空白），无法切分返回 null。 */
+  private static List<String> splitTopLevel(String listText, boolean[] live, int baseOffset) {
+    if (listText.isEmpty()) {
+      return null;
+    }
+    List<String> items = new ArrayList<>();
+    int depth = 0;
+    int start = 0;
+    int n = listText.length();
+    for (int i = 0; i < n; i++) {
+      int abs = baseOffset + i;
+      boolean liveHere = abs >= 0 && abs < live.length && live[abs];
+      if (!liveHere) {
+        continue;
+      }
+      char c = listText.charAt(i);
+      if (c == '(') {
+        depth++;
+      } else if (c == ')') {
+        depth--;
+      } else if (c == ',' && depth == 0) {
+        items.add(listText.substring(start, i).trim());
+        start = i + 1;
+      }
+    }
+    items.add(listText.substring(start).trim());
+    return items.stream().noneMatch(String::isEmpty) ? items : null;
+  }
+
+  /** select 清单项 → 输出列名：显式别名 > 裸（点分）列尾段 > EXPR$索引
+   * （与 Calcite 校验器对无别名表达式项的命名一致）；* / t.* 与无法识别形态
+   * 返回 null（调用方放弃改写）。 */
+  private static String outputColumnName(String item, int index) {
+    if (item.isEmpty() || item.equals("*") || item.endsWith(".*")) {
+      return null;
+    }
+    java.util.regex.Matcher as = java.util.regex.Pattern.compile(
+        "(?is)^(.+?)\\s+AS\\s+([a-zA-Z_][a-zA-Z0-9_$]*)$").matcher(item);
+    if (as.matches()) {
+      return as.group(2);
+    }
+    if (item.matches("(?i)^[a-zA-Z_][a-zA-Z0-9_$]*(\\s*\\.\\s*[a-zA-Z_][a-zA-Z0-9_$]*)*$")) {
+      return item.substring(item.lastIndexOf('.') + 1).trim();
+    }
+    return "EXPR$" + index;
+  }
+
+  // 位运算主体见下方方法群
+
+  /** 表达式边界关键字：作为操作数原子扫描的硬边界出现（出现在操作数位置即判定
+   * 无法安全改写，跳过该处改写交由解析器报真实错误）。 */
+  private static final java.util.Set<String> EXPR_KEYWORDS = java.util.Set.of(
+      "SELECT", "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "BY", "LIMIT", "OFFSET",
+      "FETCH", "FIRST", "NEXT", "ROWS", "ROW", "ONLY", "WITH", "RECURSIVE", "UNION",
+      "INTERSECT", "EXCEPT", "MINUS", "ALL", "DISTINCT", "AS", "ON", "USING", "JOIN",
+      "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "CROSS", "NATURAL", "APPLY", "AND",
+      "OR", "NOT", "XOR", "IS", "NULL", "LIKE", "ILIKE", "RLIKE", "REGEXP", "IN",
+      "BETWEEN", "EXISTS", "CASE", "WHEN", "THEN", "ELSE", "END", "ASC", "DESC",
+      "NULLS", "OVER", "PARTITION", "WINDOW", "VALUES", "PRECEDING", "FOLLOWING",
+      "CURRENT", "UNBOUNDED", "TIES", "PERCENT", "EXCLUDE", "FILTER", "RESPECT",
+      "IGNORE", "CAST", "INTERVAL", "DATE", "TIME", "TIMESTAMP");
+
+  private static final java.util.Set<String> MULDIV_CONN =
+      java.util.Set.of("*", "/", "%", "MOD");
+  private static final java.util.Set<String> ARITH_CONN =
+      java.util.Set.of("*", "/", "%", "MOD", "+", "-");
+
+  /** 位运算操作符 & | ^ ~ << >> 与整除 DIV（MySQL/PostgreSQL；Calcite 解析器不支持）
+   * → 等价本地 UDF 函数调用。这些 token 在本解析器不存在其他合法用途，语句中
+   * 出现（活字符）即必为位运算/整除；按绑定优先级从紧到松分轮改写：~（一元）→
+   * DIV（乘除级，操作数为带符号单原子）→ << >>（操作数为乘除链）→ & → ^ → |
+   * （操作数为算术链）。每轮最左优先、改写后重扫，天然左结合。{@code ||} 串接与
+   * {@code &&} 逻辑与不参与匹配；操作数扫描遇表达式边界关键字/无法识别形态即
+   * 放弃该处改写（保留原样交解析器报错）。
+   *
+   * <p>已知边界：科学计数法字面量作为左操作数时（如 {@code 1e-3 & x}）左向扫描
+   * 会误拆指数符号，该形态不支持（罕见）；CASE…END 直接作操作数不支持（加括号
+   * 即可）。字面量/注释内的伪命中不动。 */
+  private static String preprocessBitwiseDiv(String sql) {
+    boolean[] live = liveMask(sql);
+    if (!hasBitwiseDivOp(sql, live)) {
+      return sql;
+    }
+    sql = rewriteBitNot(sql);
+    sql = rewriteBinaryOp(sql, "DIV", "CROSSDB_IDIV", java.util.Set.of());
+    sql = rewriteBinaryOp(sql, "<<", "CROSSDB_SHL", MULDIV_CONN);
+    sql = rewriteBinaryOp(sql, ">>", "CROSSDB_SHR", MULDIV_CONN);
+    sql = rewriteBinaryOp(sql, "&", "CROSSDB_BITAND", ARITH_CONN);
+    sql = rewriteBinaryOp(sql, "^", "CROSSDB_BITXOR", ARITH_CONN);
+    sql = rewriteBinaryOp(sql, "|", "CROSSDB_BITOR", ARITH_CONN);
+    return sql;
+  }
+
+  /** 语句中是否存在活字符的位运算/DIV 操作符（|| 与 && 不算）。 */
+  private static boolean hasBitwiseDivOp(String sql, boolean[] live) {
+    int n = sql.length();
+    for (int i = 0; i < n; i++) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == '^' || c == '~' || c == '&') {
+        if (c != '&' || !isDoubled(sql, live, i, '&')) {
+          return true;
+        }
+      } else if (c == '|') {
+        if (!isDoubled(sql, live, i, '|')) {
+          return true;
+        }
+      } else if (c == '<' && i + 1 < n && live[i + 1] && sql.charAt(i + 1) == '<') {
+        return true;
+      } else if (c == '>' && i + 1 < n && live[i + 1] && sql.charAt(i + 1) == '>') {
+        return true;
+      } else if ((c == 'd' || c == 'D') && wordEquals(sql, i, "DIV")
+          && isWordStart(sql, live, i) && isWordEnd(sql, live, i + 3)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /** i 处字符与相邻同字符构成双字符 token（|| / &&），不能按位运算处理。 */
+  private static boolean isDoubled(String sql, boolean[] live, int i, char c) {
+    return (i + 1 < sql.length() && live[i + 1] && sql.charAt(i + 1) == c)
+        || (i > 0 && live[i - 1] && sql.charAt(i - 1) == c);
+  }
+
+  private static boolean wordEquals(String sql, int i, String word) {
+    return sql.regionMatches(true, i, word, 0, word.length());
+  }
+
+  private static boolean isWordStart(String sql, boolean[] live, int i) {
+    return i == 0 || !live[i - 1] || !isIdentPart(sql.charAt(i - 1));
+  }
+
+  private static boolean isWordEnd(String sql, boolean[] live, int end) {
+    return end >= sql.length() || !live[end] || !isIdentPart(sql.charAt(end));
+  }
+
+  /** 一元按位取反 {@code ~x} → CROSSDB_BITNOT(x)：操作数为（可带符号的）单原子。 */
+  private static String rewriteBitNot(String sql) {
+    int searchFrom = 0;
+    while (true) {
+      boolean[] live = liveMask(sql);
+      int op = -1;
+      for (int i = searchFrom; i < sql.length(); i++) {
+        if (live[i] && sql.charAt(i) == '~') {
+          op = i;
+          break;
+        }
+      }
+      if (op < 0) {
+        return sql;
+      }
+      int atomStart = skipBlank(sql, live, op + 1);
+      int atomEnd = atomRight(sql, live, atomStart, true);
+      if (atomEnd < 0) {
+        searchFrom = op + 1;
+        continue;
+      }
+      sql = sql.substring(0, op) + "CROSSDB_BITNOT("
+          + sql.substring(atomStart, atomEnd) + ")" + sql.substring(atomEnd);
+      searchFrom = 0;
+    }
+  }
+
+  /** 二元位运算/整除一轮改写：最左优先，操作数链按 connectors 扩展；改写一处后
+   * 从头重扫（左结合）。op 为 "DIV" 时按词匹配，否则按字符匹配（避开 || / &&
+   * 与 << >> 的单字符误配：按 op 长度精确消费）。 */
+  private static String rewriteBinaryOp(String sql, String op, String fn,
+      java.util.Set<String> connectors) {
+    boolean word = op.equals("DIV");
+    int searchFrom = 0;
+    while (true) {
+      boolean[] live = liveMask(sql);
+      int opStart = -1;
+      int opEnd = -1;
+      for (int i = searchFrom; i < sql.length(); i++) {
+        if (!live[i]) {
+          continue;
+        }
+        char c = sql.charAt(i);
+        if (word) {
+          if ((c == 'd' || c == 'D') && wordEquals(sql, i, op)
+              && isWordStart(sql, live, i) && isWordEnd(sql, live, i + op.length())) {
+            opStart = i;
+            opEnd = i + op.length();
+            break;
+          }
+        } else if (c == op.charAt(0) && sql.regionMatches(i, op, 0, op.length())
+            && (op.length() == 2 || !isDoubled(sql, live, i, c))
+            && (i + op.length() >= sql.length() || live[i + op.length()])) {
+          // 双字符操作符（<< >>）按整体匹配即可（<= 不会误配）；单字符操作符
+          // 须避开 || / && 双字符 token
+          opStart = i;
+          opEnd = i + op.length();
+          break;
+        }
+      }
+      if (opStart < 0) {
+        return sql;
+      }
+      int ls = scanOperandLeft(sql, live, opStart, connectors);
+      int re = ls < 0 ? -1 : scanOperandRight(sql, live, opEnd, connectors);
+      if (re < 0) {
+        searchFrom = opEnd;
+        continue;
+      }
+      sql = sql.substring(0, ls) + fn + "(" + sql.substring(ls, opStart).trim() + ", "
+          + sql.substring(opEnd, re).trim() + ")" + sql.substring(re);
+      searchFrom = 0;
+    }
+  }
+
+  /** signPos 处的 +/- 是否为一元符号：其前（跳过空白）不是原子结尾（标识符/
+   * 数字/右括号/字面量）即为符号，否则为二元操作符。 */
+  private static boolean signIsUnary(String sql, boolean[] live, int signPos) {
+    int p = skipBlankBack(sql, live, signPos - 1);
+    return p < 0 || !live[p] || !isAtomEnder(sql.charAt(p));
+  }
+
+  /** 目标操作符左操作数起点：单原子 + 向左按连接符扩展（+/- 需原子邻接判定
+   * 二元/符号）。返回起点下标，失败 -1。 */
+  private static int scanOperandLeft(String sql, boolean[] live, int opStart,
+      java.util.Set<String> connectors) {
+    int i = skipBlankBack(sql, live, opStart - 1);
+    int atomStart = atomLeft(sql, live, i);
+    if (atomStart < 0) {
+      return -1;
+    }
+    while (true) {
+      int j = skipBlankBack(sql, live, atomStart - 1);
+      int[] conn = connectorAtLeft(sql, live, j, connectors);
+      if (conn == null) {
+        return atomStart;
+      }
+      int k = skipBlankBack(sql, live, conn[0] - 1);
+      int prev = atomLeft(sql, live, k);
+      if (prev < 0) {
+        // 连接符左侧不是原子：若为一元符号则并入操作数，否则到此为止
+        if (conn[1] == conn[0] + 1 && k >= 0 && k < sql.length() && live[k]
+            && (sql.charAt(k) == '-' || sql.charAt(k) == '+')
+            && signIsUnary(sql, live, k)) {
+          return k;
+        }
+        return atomStart;
+      }
+      atomStart = prev;
+    }
+  }
+
+  /** 目标操作符右操作数终点：单原子 + 向右按连接符扩展。返回终点下标（排他），
+   * 失败 -1。 */
+  private static int scanOperandRight(String sql, boolean[] live, int opEnd,
+      java.util.Set<String> connectors) {
+    int i = skipBlank(sql, live, opEnd);
+    int atomEnd = atomRight(sql, live, i, true);
+    if (atomEnd < 0) {
+      return -1;
+    }
+    while (true) {
+      int j = skipBlank(sql, live, atomEnd);
+      int[] conn = connectorAtRight(sql, live, j, connectors);
+      if (conn == null) {
+        return atomEnd;
+      }
+      int k = skipBlank(sql, live, conn[1]);
+      int next = atomRight(sql, live, k, true);
+      if (next < 0) {
+        return atomEnd;
+      }
+      atomEnd = next;
+    }
+  }
+
+  /** j 处（活字符）是否为连接符：返回 {起点, 终点}，非连接符返回 null。 */
+  private static int[] connectorAtRight(String sql, boolean[] live, int j,
+      java.util.Set<String> connectors) {
+    if (j >= sql.length() || !live[j]) {
+      return null;
+    }
+    char c = sql.charAt(j);
+    String one = String.valueOf(c);
+    if ((c == '*' || c == '/' || c == '%' || c == '+' || c == '-')
+        && connectors.contains(one)) {
+      return new int[]{j, j + 1};
+    }
+    if ((c == 'm' || c == 'M') && connectors.contains("MOD")
+        && wordEquals(sql, j, "MOD") && isWordStart(sql, live, j)
+        && isWordEnd(sql, live, j + 3)) {
+      return new int[]{j, j + 3};
+    }
+    return null;
+  }
+
+  /** j 处（活字符，含 j）向左的连接符：返回 {起点, 终点+1}。 */
+  private static int[] connectorAtLeft(String sql, boolean[] live, int j,
+      java.util.Set<String> connectors) {
+    if (j < 0 || !live[j]) {
+      return null;
+    }
+    char c = sql.charAt(j);
+    String one = String.valueOf(c);
+    if ((c == '*' || c == '/' || c == '%' || c == '+' || c == '-')
+        && connectors.contains(one)) {
+      return new int[]{j, j + 1};
+    }
+    if ((c == 'd' || c == 'D') && connectors.contains("MOD")
+        && j >= 2 && wordEquals(sql, j - 2, "MOD")
+        && isWordStart(sql, live, j - 2) && j + 1 <= sql.length()
+        && isWordEnd(sql, live, j + 1)) {
+      return new int[]{j - 2, j + 1};
+    }
+    return null;
+  }
+
+  /** 自 i（活字符）起向右扫一个原子：字面量（死区）/ 括号组 / 函数调用 /
+   * 点分标识符 / 数值字面量（含指数）；allowSign 允许前导 +/- 符号。返回原子
+   * 终点（排他），无法识别返回 -1。表达式边界关键字不是原子。 */
+  private static int atomRight(String sql, boolean[] live, int i, boolean allowSign) {
+    int n = sql.length();
+    if (i >= n) {
+      return -1;
+    }
+    if (!live[i]) {
+      while (i < n && !live[i]) {
+        i++;
+      }
+      return i;   // 字面量整体为一个原子
+    }
+    char c = sql.charAt(i);
+    if (allowSign && (c == '-' || c == '+')) {
+      return atomRight(sql, live, skipBlank(sql, live, i + 1), false);
+    }
+    if (c == '(') {
+      int end = matchParen(sql, live, i);
+      return end < 0 ? -1 : end;
+    }
+    if (Character.isDigit(c) || c == '.') {
+      int j = i + 1;
+      while (j < n && live[j] && (Character.isDigit(sql.charAt(j)) || sql.charAt(j) == '.')) {
+        j++;
+      }
+      if (j < n && live[j] && (sql.charAt(j) == 'e' || sql.charAt(j) == 'E')) {
+        int k = j + 1;
+        if (k < n && live[k] && (sql.charAt(k) == '+' || sql.charAt(k) == '-')) {
+          k++;
+        }
+        if (k < n && live[k] && Character.isDigit(sql.charAt(k))) {
+          while (k < n && live[k] && Character.isDigit(sql.charAt(k))) {
+            k++;
+          }
+          j = k;
+        }
+      }
+      return j;
+    }
+    if (isIdentStart(c)) {
+      int j = i + 1;
+      while (j < n && live[j] && (isIdentPart(sql.charAt(j)) || sql.charAt(j) == '.')) {
+        j++;
+      }
+      String word = wordAt(sql, i).toUpperCase();
+      if (word.equals("TRUE") || word.equals("FALSE")) {
+        return j;
+      }
+      if (EXPR_KEYWORDS.contains(word)) {
+        return -1;
+      }
+      int k = skipBlank(sql, live, j);
+      if (k < n && live[k] && sql.charAt(k) == '(') {
+        int end = matchParen(sql, live, k);
+        return end < 0 ? -1 : end;
+      }
+      return j;
+    }
+    return -1;
+  }
+
+  /** 自 i（活字符）起向左扫一个原子（i 为原子最后一个字符）：返回原子起点，
+   * 无法识别返回 -1。 */
+  private static int atomLeft(String sql, boolean[] live, int i) {
+    if (i < 0) {
+      return -1;
+    }
+    if (!live[i]) {
+      while (i >= 0 && !live[i]) {
+        i--;
+      }
+      return i + 1;   // 字面量整体为一个原子
+    }
+    char c = sql.charAt(i);
+    if (c == ')') {
+      int start = matchParenBack(sql, live, i);
+      if (start < 0) {
+        return -1;
+      }
+      int before = skipBlankBack(sql, live, start - 1);
+      // 函数调用：F( ... ) —— 括号前紧跟标识符则并入原子
+      if (before >= 0 && live[before] && isIdentPart(sql.charAt(before))) {
+        int j = before;
+        while (j >= 0 && live[j] && (isIdentPart(sql.charAt(j)) || sql.charAt(j) == '.')) {
+          j--;
+        }
+        String word = wordAt(sql, j + 1).toUpperCase();
+        if (EXPR_KEYWORDS.contains(word)) {
+          return start;   // 关键字后随括号（如 IN (…)）不是函数调用
+        }
+        return j + 1;
+      }
+      // 前置一元符号（如 -(a+b)）：并入括号原子
+      if (before >= 0 && live[before]
+          && (sql.charAt(before) == '-' || sql.charAt(before) == '+')
+          && signIsUnary(sql, live, before)) {
+        return before;
+      }
+      return start;
+    }
+    if (isIdentPart(c) || c == '.') {
+      int j = i;
+      while (j >= 0 && live[j] && (isIdentPart(sql.charAt(j)) || sql.charAt(j) == '.')) {
+        j--;
+      }
+      int start = j + 1;
+      String word = wordAt(sql, start).toUpperCase();
+      if (word.equals("TRUE") || word.equals("FALSE")) {
+        return start;
+      }
+      if (EXPR_KEYWORDS.contains(word)) {
+        return -1;
+      }
+      // 前置一元符号：符号本身之前不是原子结尾（二元操作数）即为符号
+      int before = skipBlankBack(sql, live, start - 1);
+      if (before >= 0 && live[before]
+          && (sql.charAt(before) == '-' || sql.charAt(before) == '+')
+          && signIsUnary(sql, live, before)) {
+        return before;
+      }
+      return start;
+    }
+    return -1;
+  }
+
+  /** 括号反向匹配：'(' 的位置，不匹配返回 -1。 */
+  private static int matchParenBack(String sql, boolean[] live, int close) {
+    int depth = 0;
+    for (int i = close; i >= 0; i--) {
+      if (!live[i]) {
+        continue;
+      }
+      char c = sql.charAt(i);
+      if (c == ')') {
+        depth++;
+      } else if (c == '(' && --depth == 0) {
+        return i;
+      }
+    }
+    return -1;
+  }
+
+  /** 自 start 起向左跳过空白，返回最后一个活字符下标；无则返回 -1。 */
+  private static int skipBlankBack(String sql, boolean[] live, int start) {
+    int i = start;
+    while (i >= 0 && (!live[i] || Character.isWhitespace(sql.charAt(i)))) {
+      i--;
+    }
+    return i;
+  }
+
+  /** 字符是否可作为原子的结尾（用于一元符号与二元操作符的消歧）。 */
+  private static boolean isAtomEnder(char c) {
+    return isIdentPart(c) || c == ')' || c == '.';
+  }
 
   /** MySQL {@code REGEXP} 操作符（Calcite 解析器仅支持同义关键字 RLIKE）→ RLIKE，
    * 随后由解析树改写挂载到本地 CROSSDB_REGEXP。NOT REGEXP 同步生效（NOT RLIKE 合法）。 */
@@ -803,15 +1723,23 @@ final class SqlRewrites {
 
   // ---------- 解析树改写 ----------
 
-  /** 改写入口：表达式级 shuttle 改写 + USING / 别名列清单的 FROM 级改写。 */
-  static SqlNode rewrite(SqlNode parsed, SchemaPlus root, JavaTypeFactory typeFactory) {
-    parsed = parsed.accept(rewriter());
+  /** 改写入口：表达式级 shuttle 改写 + USING / 别名列清单的 FROM 级改写。
+   * hints 为已注册源库的列类型目录（可为 null，等价空目录）。 */
+  static SqlNode rewrite(SqlNode parsed, SchemaPlus root, JavaTypeFactory typeFactory,
+      ColumnHints hints) {
+    ColumnHints h = hints == null ? ColumnHints.EMPTY : hints;
+    parsed = parsed.accept(rewriter(h));
     return new FromRewriter(root, typeFactory).expand(parsed);
   }
 
-  private static SqlShuttle rewriter() {
+  private static SqlShuttle rewriter(ColumnHints hints) {
     return new SqlShuttle() {
       @Override public SqlNode visit(SqlCall call) {
+        if (call.getKind().belongsTo(SqlKind.DDL) || call.getKind().belongsTo(SqlKind.DML)) {
+          // DDL/DML 仅会被只读硬化拒绝，且其专用节点（SqlCreate 等）不能按
+          // 通用 createCall 重建（shuttle 深入会崩），直接原样返回
+          return call;
+        }
         call = (SqlCall) super.visit(call);
         if (call.getOperator() == SqlStdOperatorTable.SIMILAR_TO
             || call.getOperator() == SqlStdOperatorTable.NOT_SIMILAR_TO) {
@@ -859,6 +1787,12 @@ final class SqlRewrites {
         if (upper.equals("ISNULL")) {
           return rewriteIsnull(call);
         }
+        if (upper.equals("NVL") && call.getOperandList().size() == 2) {
+          // Oracle NVL(a, b) ≡ COALESCE(a, b)（NULL 字面量首参时 UDF 的 ARG0
+          // 返回类型推导为 Void 会在运行期抛类型转换异常，改写挂标准 COALESCE）
+          return new SqlBasicCall(SqlStdOperatorTable.COALESCE, call.getOperandList(),
+              call.getParserPosition());
+        }
         if (upper.equals("ILIKE") || upper.equals("NOT ILIKE")) {
           return rewriteIlike(call);
         }
@@ -881,6 +1815,62 @@ final class SqlRewrites {
           return ops.size() == 3
               ? new SqlBasicCall(TRANSLATE_FN, ops, call.getParserPosition())
               : call;
+        }
+        if (upper.equals("LOG")) {
+          return rewriteLog(call);
+        }
+        if (upper.equals("SPACE") && call.getOperandList().size() == 1) {
+          // MySQL SPACE(n) → REPEAT(' ', n)（复用本地 UDF）
+          SqlParserPos pos = call.getParserPosition();
+          return new SqlBasicCall(REPEAT_FN, List.of(
+              SqlLiteral.createCharString(" ", pos), call.getOperandList().get(0)), pos);
+        }
+        if (upper.equals("CHAR") && call.getOperandList().size() == 1) {
+          // MySQL CHAR(n) → CHR(n)（复用本地 UDF）
+          return new SqlBasicCall(CHR_FN, call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("STRCMP")) {
+          return rewriteStrcmp(call);
+        }
+        if ((upper.equals("LEFT") || upper.equals("RIGHT"))
+            && call.getOperandList().size() == 2) {
+          // MySQL/SQL Server LEFT/RIGHT(s, n) → 本地 UDF
+          return new SqlBasicCall(upper.equals("LEFT") ? LEFT_FN : RIGHT_FN,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("LOCATE")
+            && (call.getOperandList().size() == 2 || call.getOperandList().size() == 3)) {
+          // MySQL/PostgreSQL LOCATE(substr, str[, start]) → 本地 UDF
+          return new SqlBasicCall(
+              call.getOperandList().size() == 2 ? LOCATE2_FN : LOCATE3_FN,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if ((call.getOperator() == SqlStdOperatorTable.MOD || upper.equals("MOD"))
+            && modFloatInvolved(call, hints)) {
+          // MOD 浮点语义修正：仅操作数含浮点（字面量或目录已知浮点列）时挂本地
+          // 实现（Java % 语义）；整数 MOD 保持原生路径（可下推源库）。
+          // MOD(a,b) 函数形与 a MOD b / a % b 操作符形同名同实例，按名兜底匹配
+          return new SqlBasicCall(MOD_FN, call.getOperandList(), call.getParserPosition());
+        }
+        if (call.getKind() == SqlKind.CAST) {
+          return rewriteCastBoolean(call, hints);
+        }
+        if (call.getKind() == SqlKind.PLUS || call.getKind() == SqlKind.MINUS) {
+          return rewriteDateArith(call, hints);
+        }
+        if (call.getKind() == SqlKind.MATCH_RECOGNIZE) {
+          // SQL:2011 标准默认 AFTER MATCH SKIP PAST LAST ROW——Calcite 解析器/
+          // 转换器默认给 SKIP TO NEXT ROW（与标准及 Oracle/PostgreSQL 不一致），
+          // 未显式指定 AFTER 时补上标准默认字面量
+          org.apache.calcite.sql.SqlMatchRecognize mr =
+              (org.apache.calcite.sql.SqlMatchRecognize) call;
+          if (mr.getAfter() == null) {
+            mr.setOperand(org.apache.calcite.sql.SqlMatchRecognize.OPERAND_AFTER,
+                SqlLiteral.createSymbol(
+                    org.apache.calcite.sql.SqlMatchRecognize.AfterOption.SKIP_PAST_LAST_ROW,
+                    mr.getParserPosition()));
+          }
+          return call;
         }
         if (call.getKind() == SqlKind.WITHIN_GROUP) {
           return rewriteWithinGroup(call);
@@ -938,6 +1928,167 @@ final class SqlRewrites {
         }
         return call;
       }
+    };
+  }
+
+  /** LOG(x)（PostgreSQL/MySQL 单参 = 自然对数，Calcite 仅注册 LN）→ LN(x)；
+   * LOG(b, x)（对数底 b）→ LN(x) / LN(b)。其余元数保留原样交校验器报错。 */
+  private static SqlNode rewriteLog(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    SqlParserPos pos = call.getParserPosition();
+    if (ops.size() == 1) {
+      return new SqlBasicCall(SqlStdOperatorTable.LN, ops, pos);
+    }
+    if (ops.size() == 2) {
+      return new SqlBasicCall(SqlStdOperatorTable.DIVIDE, List.of(
+          new SqlBasicCall(SqlStdOperatorTable.LN, List.of(ops.get(1)), pos),
+          new SqlBasicCall(SqlStdOperatorTable.LN, List.of(ops.get(0)), pos)), pos);
+    }
+    return call;
+  }
+
+  /** STRCMP(a, b)（MySQL）→ CASE：任一 NULL 得 NULL；a=b 得 0、a<b 得 -1、
+   * 其余（a>b）得 1。比较语义由校验器按操作数类型推导。 */
+  private static SqlNode rewriteStrcmp(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2) {
+      return call;
+    }
+    SqlNode a = ops.get(0);
+    SqlNode b = ops.get(1);
+    SqlParserPos pos = call.getParserPosition();
+    SqlNodeList whens = new SqlNodeList(pos);
+    whens.add(new SqlBasicCall(SqlStdOperatorTable.OR, List.of(
+        new SqlBasicCall(SqlStdOperatorTable.IS_NULL, List.of(a), pos),
+        new SqlBasicCall(SqlStdOperatorTable.IS_NULL, List.of(b), pos)), pos));
+    whens.add(new SqlBasicCall(SqlStdOperatorTable.EQUALS, List.of(a, b), pos));
+    whens.add(new SqlBasicCall(SqlStdOperatorTable.LESS_THAN, List.of(a, b), pos));
+    SqlNodeList thens = new SqlNodeList(pos);
+    thens.add(SqlLiteral.createNull(pos));
+    thens.add(SqlLiteral.createExactNumeric("0", pos));
+    thens.add(SqlLiteral.createExactNumeric("-1", pos));
+    return new SqlCase(pos, null, whens, thens,
+        SqlLiteral.createExactNumeric("1", pos));
+  }
+
+  private static final java.util.Set<SqlTypeName> NUMERIC_TYPE_NAMES = java.util.Set.of(
+      SqlTypeName.TINYINT, SqlTypeName.SMALLINT, SqlTypeName.INTEGER, SqlTypeName.BIGINT,
+      SqlTypeName.DECIMAL, SqlTypeName.FLOAT, SqlTypeName.REAL, SqlTypeName.DOUBLE);
+
+  /** CAST(布尔 AS 数值)（MySQL 布尔即 tinyint 语义，Calcite 校验器类型系统拒绝）→
+   * 等价改写：TRUE/FALSE 字面量直接换 1/0；布尔列（列类型目录判定）换
+   * CASE WHEN x THEN 1 WHEN NOT x THEN 0 END（缺省 ELSE NULL，NULL→NULL）。 */
+  private static SqlNode rewriteCastBoolean(SqlCall call, ColumnHints hints) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2 || !(ops.get(1) instanceof SqlDataTypeSpec spec)
+        || !(spec.getTypeNameSpec() instanceof SqlBasicTypeNameSpec basic)) {
+      return call;
+    }
+    // SqlBasicTypeNameSpec.getTypeName() 返回 SqlIdentifier（如 INT 归一为
+    // INTEGER），经 SqlTypeName.get 映射回枚举判定数值目标类型
+    SqlTypeName target = SqlTypeName.get(basic.getTypeName().getSimple());
+    if (target == null || !NUMERIC_TYPE_NAMES.contains(target)) {
+      return call;
+    }
+    SqlNode operand = ops.get(0);
+    SqlParserPos pos = call.getParserPosition();
+    if (operand instanceof SqlLiteral lit && lit.getTypeName() == SqlTypeName.BOOLEAN) {
+      return SqlLiteral.createExactNumeric(
+          Boolean.TRUE.equals(lit.getValue()) ? "1" : "0", pos);
+    }
+    if (operand instanceof SqlIdentifier id && id.isSimple()
+        && hints.isBooleanColumn(id.getSimple())) {
+      SqlNodeList whens = new SqlNodeList(pos);
+      whens.add(operand);
+      whens.add(new SqlBasicCall(SqlStdOperatorTable.NOT, List.of(operand), pos));
+      SqlNodeList thens = new SqlNodeList(pos);
+      thens.add(SqlLiteral.createExactNumeric("1", pos));
+      thens.add(SqlLiteral.createExactNumeric("0", pos));
+      return new SqlCase(pos, null, whens, thens, SqlLiteral.createNull(pos));
+    }
+    return call;
+  }
+
+  /** DATE 列 ± 整数（Oracle 语义：日加减，Calcite 类型系统原生不支持 DATE 与
+   * 数值直接加减）→ DATE ± INTERVAL 'n' DAY（结果仍为 DATE，天精度区间不加带
+   * 时间部分）。仅当裸列名在已注册库目录中无歧义地为 DATE/TIMESTAMP 时改写；
+   * n + date 仅加法交换后改写。 */
+  private static SqlNode rewriteDateArith(SqlCall call, ColumnHints hints) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2) {
+      return call;
+    }
+    boolean plus = call.getKind() == SqlKind.PLUS;
+    SqlNode date;
+    SqlNode other;
+    if (isDateColumn(ops.get(0), hints)) {
+      date = ops.get(0);
+      other = ops.get(1);
+    } else if (plus && isDateColumn(ops.get(1), hints)) {
+      date = ops.get(1);
+      other = ops.get(0);
+    } else {
+      return call;
+    }
+    Long days = integerLiteral(other);
+    if (days == null) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    org.apache.calcite.avatica.util.TimeUnit dayUnit =
+        org.apache.calcite.avatica.util.TimeUnit.DAY;
+    long magnitude = Math.abs(days);
+    SqlNode interval = SqlLiteral.createInterval(days < 0 ? -1 : 1,
+        Long.toString(magnitude), new SqlIntervalQualifier(dayUnit, null, pos), pos);
+    return new SqlBasicCall(plus ? SqlStdOperatorTable.PLUS : SqlStdOperatorTable.MINUS,
+        List.of(date, interval), pos);
+  }
+
+  private static boolean isDateColumn(SqlNode node, ColumnHints hints) {
+    return node instanceof SqlIdentifier id && id.isSimple()
+        && hints.isDateColumn(id.getSimple());
+  }
+
+  /** 整数字面量（含一元负号形态）→ Long；非整数字面量返回 null。 */
+  private static Long integerLiteral(SqlNode node) {
+    if (node instanceof SqlLiteral lit && lit.getValue() instanceof BigDecimal bd
+        && bd.scale() <= 0) {
+      try {
+        return bd.longValueExact();
+      } catch (ArithmeticException e) {
+        return null;
+      }
+    }
+    if (node instanceof SqlBasicCall neg
+        && neg.getOperator() == SqlStdOperatorTable.UNARY_MINUS
+        && neg.getOperandList().size() == 1) {
+      Long v = integerLiteral(neg.getOperandList().get(0));
+      return v == null ? null : -v;
+    }
+    return null;
+  }
+
+  /** MOD 操作数是否含浮点成分：浮点/带标度 DECIMAL 字面量，或列类型目录中的
+   * 浮点列（裸列名）。整数 MOD 不改写，保持原生下推路径。 */
+  private static boolean modFloatInvolved(SqlCall mod, ColumnHints hints) {
+    for (SqlNode op : mod.getOperandList()) {
+      if (isFloatLiteral(op) || (op instanceof SqlIdentifier id && id.isSimple()
+          && hints.isFloatColumn(id.getSimple()))) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  private static boolean isFloatLiteral(SqlNode node) {
+    if (!(node instanceof SqlLiteral lit)) {
+      return false;
+    }
+    return switch (lit.getTypeName()) {
+      case DOUBLE, FLOAT, REAL -> true;
+      case DECIMAL -> lit.getValue() instanceof BigDecimal bd
+          && bd.stripTrailingZeros().scale() > 0;
+      default -> false;
     };
   }
 
@@ -1579,6 +2730,90 @@ final class SqlRewrites {
             : call;
       }
       return node;
+    }
+  }
+
+  /** 列类型目录：供解析期「类型感知改写」（DATE±整数、CAST(布尔 AS 数值)、MOD
+   * 浮点修正）按裸列名判定列类型。经 JDBC DatabaseMetaData 扫描各已注册源库构建；
+   * 跨库同名但类别不一致的列名一律剔除（防误改写）；扫描失败降级为空目录
+   * （相关改写不生效，维持原生报错路径）。类别仅保留粗粒度：date / bool /
+   * float / int / other。 */
+  static final class ColumnHints {
+    static final ColumnHints EMPTY = new ColumnHints(Map.of());
+    private final Map<String, String> categories;
+
+    private ColumnHints(Map<String, String> categories) {
+      this.categories = categories;
+    }
+
+    boolean isDateColumn(String name) {
+      return "date".equals(categories.get(key(name)));
+    }
+
+    boolean isBooleanColumn(String name) {
+      return "bool".equals(categories.get(key(name)));
+    }
+
+    boolean isFloatColumn(String name) {
+      return "float".equals(categories.get(key(name)));
+    }
+
+    private static String key(String name) {
+      return name.toLowerCase(java.util.Locale.ROOT);
+    }
+
+    static ColumnHints scan(java.util.Collection<javax.sql.DataSource> sources) {
+      Map<String, String> cats = new LinkedHashMap<>();
+      java.util.Set<String> dropped = new java.util.HashSet<>();
+      for (javax.sql.DataSource ds : sources) {
+        try (java.sql.Connection c = ds.getConnection();
+             java.sql.ResultSet rs = c.getMetaData().getColumns(null, null, "%", "%")) {
+          while (rs.next()) {
+            String col = rs.getString("COLUMN_NAME");
+            int scale = rs.getInt("DECIMAL_DIGITS");
+            String cat = category(rs.getInt("DATA_TYPE"), rs.wasNull() ? -1 : scale);
+            String key = key(col);
+            String prev = cats.get(key);
+            if (prev == null) {
+              cats.put(key, cat);
+            } else {
+              cats.put(key, mergeCategory(prev, cat, key, dropped));
+            }
+          }
+        } catch (java.sql.SQLException e) {
+          return EMPTY;   // 元数据不可得：降级为空目录，改写安全旁路
+        }
+      }
+      dropped.forEach(cats::remove);
+      return new ColumnHints(cats);
+    }
+
+    /** 同名列类别合并：数值类内部以「更宽」者为准（int 遇 float → float：按浮点
+     * 语义改写 MOD 等，正确性优先，代价仅是该列 MOD 不再下推）；跨大类冲突
+     * （date/bool 与其他）无法安全裁决 → 剔除该列。 */
+    private static String mergeCategory(String a, String b, String key,
+        java.util.Set<String> dropped) {
+      if (a.equals(b)) {
+        return a;
+      }
+      java.util.Set<String> s = java.util.Set.of(a, b);
+      if (s.equals(java.util.Set.of("int", "float"))) {
+        return "float";
+      }
+      dropped.add(key);
+      return a;
+    }
+
+    private static String category(int jdbcType, int scale) {
+      return switch (jdbcType) {
+        case java.sql.Types.DATE, java.sql.Types.TIMESTAMP -> "date";
+        case java.sql.Types.BOOLEAN, java.sql.Types.BIT -> "bool";
+        case java.sql.Types.DOUBLE, java.sql.Types.FLOAT, java.sql.Types.REAL -> "float";
+        case java.sql.Types.NUMERIC, java.sql.Types.DECIMAL -> scale > 0 ? "float" : "int";
+        case java.sql.Types.TINYINT, java.sql.Types.SMALLINT, java.sql.Types.INTEGER,
+            java.sql.Types.BIGINT -> "int";
+        default -> "other";
+      };
     }
   }
 }

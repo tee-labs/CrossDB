@@ -20,7 +20,7 @@
 ## 快速开始
 
 ```bash
-mvn test                                                     # 441 个 JUnit 单元测试（两个模块；4 个 @Disabled("待支持: …") 兼容性用例按设计跳过）
+mvn test                                                     # 922 个 JUnit 单元测试（两个模块；22 个 @Disabled("待支持: …") 兼容性用例按设计跳过）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
 # 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
 # 非 UTC 时区的机器请加 -DargLine="-Duser.timezone=UTC"（TIMESTAMP 按 UTC 墙钟承载）
@@ -163,7 +163,7 @@ safeMode 与 FULL JOIN 的补充边界：
 
 ## 单元测试覆盖
 
-  441 个测试分七组（其中 4 个以 `@Disabled("待支持: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
+  922 个测试分十二组（其中 22 个以 `@Disabled("待支持: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
@@ -172,6 +172,8 @@ safeMode 与 FULL JOIN 的补充边界：
 - `CrossDbCompatibilityTest`：方言与特性兼容性覆盖（参考 PostgreSQL regress/Calcite/Trino/SQL Server/Oracle/MySQL 公开用例补充）：JOIN 扩展（USING/NATURAL、四库链、OR 条件回退、双侧聚合派生表、复合键 ANTI、IN 子查询含 UNION）、集合操作扩展（类型放宽合并、括号操作数、标准 OFFSET…FETCH、Oracle MINUS、分支内 LIMIT、CTE 含 UNION 双引用、EXCEPT-UNION 链）、窗口帧与排名（ROWS 帧三形态、NTILE、CUME_DIST/PERCENT_RANK 等价改写、NTH_VALUE 帧内语义本地实现）、聚合扩展（FILTER 条件聚合、LISTAGG、VAR/STDDEV、SUM DISTINCT）、函数扩展（TRIM 变体、SUBSTRING FROM/FOR、OVERLAY/INITCAP/FLOOR…TO 本地改写、CHR/LPAD/REPEAT/GREATEST/NVL/STRING_AGG/GROUP_CONCAT）、递归 CTE（EnumerableRepeatUnion 落地）/PIVOT/GROUP BY 别名、错误契约（非法 CAST、除零、非分组列）；
 - `CrossDbExtensionsTest`：扩展场景覆盖（PostgreSQL LATERAL / SQL Server APPLY / 标准 VALUES / MySQL CONCAT 族 / Oracle MEDIAN·LISTAGG 等）：横向引用与表构造器（VALUES 派生表、LATERAL、CROSS/OUTER APPLY、UNNEST）、集合操作与分页扩展（EXCEPT/INTERSECT ALL、MySQL LIMIT a,b、ORDER BY 序数）、函数扩展（CONCAT_WS、REVERSE、CEIL(ts TO unit)、滑动帧窗口、DENSE_RANK）、聚合扩展（多列 COUNT DISTINCT、GROUPING+ROLLUP、PIVOT、LISTAGG DISTINCT、MEDIAN、PERCENTILE_CONT 本地实现）、跨库组合（CTE+HAVING、三层嵌套派生表、NOT IN 空子查询、COALESCE join key）、错误契约（歧义列、自连接裸引用）；
 - `CrossDbCoverageTest`：全量场景补充覆盖（与上述用例互补，参考 PostgreSQL regress / Calcite / Trino / MySQL 8.0 / SQL Server / Oracle 公开用例）：投影与 DISTINCT（多列去重、t.* 混用、无 AS 别名）、JOIN 补充（残余非等值 LEFT JOIN、DISTINCT/LIMIT 内表派生表、复合键 SEMI、裸 CROSS JOIN、三库链、RIGHT JOIN 派生表）、子查询补充（行值 IN、多列行构造器、<> ALL、< ANY、IN+GROUP BY+HAVING、CASE 内标量子查询、NOT EXISTS NULL 语义）、聚合补充（CASE 分组键、HAVING 未选聚合、TIMESTAMP 聚合承载约定、DECIMAL AVG/SUM、COUNT DISTINCT 跳 NULL、GROUP BY 序数）、窗口补充（WINDOW 命名子句、RANGE 帧 peers、LEAD/LAG 偏移与默认值、NTH_VALUE 分区帧、空集窗口、排名派生表 Top-1）、集合补充（INTERSECT 优先级、恒假分支、三分支类型放宽、多列 UNION 去重、VALUES∪表）、VALUES 行构造器（多列+WHERE、标量表达式、行等值比较）、排序分页（LIMIT ALL、ASC 默认 NULLS LAST、分片 Top-N 升序/跨分支并列键）、表达式补充（简单 CASE、ROUND/TRUNCATE/LN/EXP、MOD 符号、|| 数值、EXTRACT DAY/EPOCH、CAST TIMESTAMP→VARCHAR、ts-INTERVAL 承载、DATE 与 TIMESTAMP 比较、CHAR 定标拼接）、NULL 三值逻辑（BETWEEN/NOT BETWEEN/LIKE 对 NULL）、递归 CTE（真实表游走、UNION 去重终止、跨库种子、输出 Top-N）、只读硬化（UPDATE/DELETE/INSERT/CREATE/DROP/ALTER/GRANT/SET/MERGE/TRUNCATE 全拒绝、explain/analyze 同拒）、safeMode（聚合归约放行、裸排序拦截、Bind Join 双侧过滤放行、聚合转置裸拉取拦截）、explain/analyze 与 ResultSet 边界（列名缺失提示、next 前取值、getBytes 类型拒收）；
+- `CrossDbComprehensiveTest` / `CrossDbFullCoverageTest` / `CrossDbFullScenariosTest`：三批「全量场景 + 修复清单」覆盖——方言标量/聚合改写（TRANSLATE/SOUNDEX/IIF/ISNULL/LIKE 族/分位数/ARRAY_AGG/MOD 浮点/LOG/LOCATE/LEFT・RIGHT/SPACE・CHAR/STRCMP/DATE±n/位运算/DIV/STRAIGHT_JOIN/CAST(布尔 AS 数值)）、窗口帧扩展（GROUPS 帧 DENSE_RANK 等价改写、FILTER+OVER、IGNORE NULLS、COUNT(DISTINCT) OVER、RANGE 间隔帧、EXCLUDE）、行构造器不等比较、MATCH_RECOGNIZE 子集（自研 EnumerableCrossMatch/CrossMatchExec 回溯匹配算子：PATTERN 拼接/量词、DEFINE 符号引用、PARTITION BY、ORDER BY、ALL ROWS PER MATCH、标准 AFTER 默认）、FETCH FIRST n PERCENT、TPC-H/DS 形态、错误契约与观测面；
+- `CrossDbFederatedSuiteTest`：按参考系统分组的联邦场景（PostgreSQL regression、MySQL 8.0、Trino 跨 catalog、DuckDB 现代 SQL、ShardingSphere 归并、TPC-H/DS 形态、SQL 标准一致性、Oracle/SQL Server、引擎加固面）：三值逻辑矩阵、NOT IN NULL 语义、分片 UNION 归并（Top-N/聚合/分页/分支 LIMIT 下推 Recording）、镜像分片自连接、跨库 FULL/USING/LATERAL/半反连接、Q1/Q3/Q13/Q18/Q21 形态与窗口占比、EXCEPT/INTERSECT ALL 多重集、IS [NOT] DISTINCT FROM、行构造器 IN、DECODE/ADD_MONTHS/LAST_DAY/MONTHS_BETWEEN、rowLimit/safeMode/只读/超时/取消矩阵；本轮 14 个历史待支持用例（GROUPS 帧、MATCH_RECOGNIZE、MOD 浮点、LOG/LOCATE/LEFT・RIGHT/SPACE・CHAR/STRCMP、DATE±n、位运算/DIV、FETCH PERCENT、STRAIGHT_JOIN、CAST 布尔）已全部修复启用，新标记 22 个候选为后续修复清单；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。

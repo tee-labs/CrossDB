@@ -75,6 +75,9 @@ public class CrossDb implements AutoCloseable {
   private final int bindParallelism;
   private final int queryTimeout;
   private boolean safeMode;
+  /** 已注册源库的列类型目录（register 后失效、plan 时惰性重建；供解析期
+   * 类型感知改写：DATE±整数、CAST(布尔 AS 数值)、MOD 浮点修正）。 */
+  private SqlRewrites.ColumnHints columnHints;
 
   public CrossDb() throws SQLException {
     this(DEFAULT_FETCH_SIZE, DEFAULT_ROW_LIMIT, DEFAULT_BIND_BATCH_SIZE,
@@ -123,6 +126,7 @@ public class CrossDb implements AutoCloseable {
     DataSource guarded =
         Guarded.wrap(dataSource, fetchSize, rowLimit, schema, stats, queryTimeout);
     sources.put(schema, guarded);
+    columnHints = null;   // 目录失效，下次 plan 惰性重建
     connection.getRootSchema().add(schema,
         JdbcSchema.create(connection.getRootSchema(), schema, guarded, null, null));
     return this;
@@ -190,9 +194,12 @@ public class CrossDb implements AutoCloseable {
     Planner planner = Frameworks.getPlanner(config);
     RelNode best;
     try {
+      if (columnHints == null) {
+        columnHints = SqlRewrites.ColumnHints.scan(sources.values());
+      }
       SqlNode parsed = planner.parse(SqlRewrites.preprocess(sql));
       parsed = SqlRewrites.rewrite(parsed, connection.getRootSchema(),
-          connection.getTypeFactory());
+          connection.getTypeFactory(), columnHints);
       checkReadOnly(parsed);
       SqlNode validated = planner.validate(parsed);
       RelRoot root = planner.rel(validated);
@@ -356,6 +363,9 @@ public class CrossDb implements AutoCloseable {
       planner.addRule(anti);
       planner.addRule(antiFilter);
       planner.addRule(shardTopN);
+      // MATCH_RECOGNIZE 子集：上游 EnumerableMatch 运行时翻译未完成（量词/符号
+      // 引用 DEFINE 无法编译），本地回溯匹配算子接管可支持形态
+      planner.addRule(CrossMatchRule.INSTANCE);
       // 剔除上游缺陷规则 EnumerableMergeUnionRule：它对 UNION DISTINCT 也把
       // (offset+fetch) 的 LIMIT 压进每个分支——去重发生在合并层，分支先截断会丢失
       // 应保留的行。跨库 UNION ALL 的 Top-N 下推由 ShardTopNRule 安全承担。

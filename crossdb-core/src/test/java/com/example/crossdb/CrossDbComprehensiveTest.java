@@ -1232,11 +1232,7 @@ class CrossDbComprehensiveTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: 上游 Calcite EnumerableMatch 未完成运行时翻译——DEFINE 中的"
-        + " LAST(col, n) 无法编译（cannot translate call LAST），PATTERN 量词（B+ 等）"
-        + "亦未实现；需自研行模式识别物理算子，待支持")
-    void matchRecognizePatternDetection() throws Exception {
+    @Test void matchRecognizePatternDetection() throws Exception {
       // SQL:2011 MATCH_RECOGNIZE：相邻日志分级连续变化序列
       try (CrossDb db = all()) {
         assertEquals("4", scalar(db, "SELECT COUNT(*) FROM logdb.logs "

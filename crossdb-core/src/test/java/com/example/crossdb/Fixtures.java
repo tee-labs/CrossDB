@@ -16,7 +16,18 @@ final class Fixtures {
       """);
   static final JdbcDataSource ORDERS = init("orders", """
       CREATE TABLE IF NOT EXISTS orders(id INT PRIMARY KEY, user_id INT, amount INT);
+      CREATE TABLE IF NOT EXISTS lineitems(id INT PRIMARY KEY, order_id INT,
+        sku VARCHAR(20), qty INT, price DECIMAL(10,2));
       INSERT INTO orders VALUES (100,1,10),(101,2,20),(102,1,5),(103,2,1);
+      INSERT INTO lineitems VALUES
+        (1, 100, 'pen', 2, 0.50),
+        (2, 100, 'ink', 1, 3.25),
+        (3, 101, 'pen', 5, 0.50),
+        (4, 101, 'pad', 1, 4.75),
+        (5, 102, 'ink', 1, 3.25),
+        (6, 102, 'pen', 3, 0.50),
+        (7, 103, 'pad', 2, 4.75),
+        (8, 103, 'ink', 1, 3.25);
       """);
   /** 复合键夹具：(user_id, tenant_id) 两列联合 join。 */
   static final JdbcDataSource CREDS = init("creds", """

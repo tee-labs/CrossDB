@@ -339,10 +339,7 @@ class CrossDbFullScenariosTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: MOD 浮点操作数被按整型语义截断（MOD(5.5, 2) 得 2，"
-        + "标准/MySQL/PostgreSQL 应为 1.5），待支持")
-    void modFloatOperandKeepsScale() throws Exception {
+    @Test void modFloatOperandKeepsScale() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("1.5"), rows(db,
             "SELECT MOD(5.5, 2) FROM userdb.small LIMIT 1"));
@@ -991,104 +988,78 @@ class CrossDbFullScenariosTest {
   @DisplayName("方言扩展候选场景（第二批）")
   class DialectCandidates2 {
 
-    @Test
-    @Disabled("待支持: LOG(x) 单参自然对数（PostgreSQL；Calcite 仅注册 LN）可改写挂 LN，待支持")
-    void logSingleArgumentPostgres() throws Exception {
+    @Test void logSingleArgumentPostgres() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("1.0", scalar(db, "SELECT ROUND(LOG(EXP(1)), 4) "
             + "FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: LOCATE(substr, str[, start]) 未注册（MySQL/PostgreSQL 方言，"
-        + "可改写挂 POSITION 或本地实现），待支持")
-    void locateWithStartPositionMysql() throws Exception {
+    @Test void locateWithStartPositionMysql() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("3", scalar(db, "SELECT LOCATE('n', 'banana', 3) "
             + "FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: LEFT/RIGHT(s, n) 字符串函数未注册（MySQL/SQL Server，"
-        + "可改写 SUBSTRING），待支持")
-    void leftRightSubstringFunctions() throws Exception {
+    @Test void leftRightSubstringFunctions() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("ab,cd", scalar(db, "SELECT LEFT('abcd', 2), RIGHT('abcd', 2) "
+        assertEquals(List.of("ab,cd"), rows(db, "SELECT LEFT('abcd', 2), RIGHT('abcd', 2) "
             + "FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: SPACE/CHAR 未注册（MySQL 方言，可本地 UDF 实现），待支持")
-    void spaceAndCharFunctions() throws Exception {
+    @Test void spaceAndCharFunctions() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("[   ],A", scalar(db, "SELECT CONCAT('[', SPACE(3), ']'), CHAR(65) "
-            + "FROM userdb.small LIMIT 1"));
+        assertEquals(List.of("[   ],A"), rows(db,
+            "SELECT CONCAT('[', SPACE(3), ']'), CHAR(65) FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: STRCMP 未注册（MySQL 方言，可经 CASE WHEN 改写），待支持")
-    void strcmpMysql() throws Exception {
+    @Test void strcmpMysql() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("-1,1,0", scalar(db, "SELECT STRCMP('a', 'b'), STRCMP('b', 'a'), "
+        assertEquals(List.of("-1,1,0"), rows(db, "SELECT STRCMP('a', 'b'), STRCMP('b', 'a'), "
             + "STRCMP('a', 'a') FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: DATE + INTEGER 日期加法（Oracle 语义）类型系统不支持，"
-        + "可改写 DATE + INTERVAL 'n' DAY，待支持")
-    void datePlusIntegerDaysOracle() throws Exception {
+    @Test void datePlusIntegerDaysOracle() throws Exception {
       try (CrossDb db = all()) {
         assertEquals("2026-01-16", scalar(db, "SELECT CAST(made + 1 AS VARCHAR) "
             + "FROM gooddb.products WHERE id = 10"));
       }
     }
 
-    @Test
-    @Disabled("待支持: 位运算操作符 & | ^ ~ << >>（MySQL/PostgreSQL）解析器不支持，待支持")
-    void bitwiseOperatorFamily() throws Exception {
+    @Test void bitwiseOperatorFamily() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("1,7,6", scalar(db, "SELECT 5 & 3, 5 | 3, 5 ^ 3 "
+        assertEquals(List.of("1,7,6"), rows(db, "SELECT 5 & 3, 5 | 3, 5 ^ 3 "
             + "FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: DIV 整除操作符（MySQL）解析器不支持，待支持")
-    void integerDivOperatorMysql() throws Exception {
+    @Test void integerDivOperatorMysql() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("3", scalar(db, "SELECT 7 DIV 2 FROM userdb.small LIMIT 1"));
+        assertEquals(List.of("3"), rows(db, "SELECT 7 DIV 2 FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: FETCH FIRST n PERCENT ROWS（SQL:2008 扩展）解析器不支持，待支持")
-    void fetchFirstPercentRows() throws Exception {
+    @Test void fetchFirstPercentRows() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("100", "101"), rows(db, "SELECT id FROM orderdb.orders "
             + "ORDER BY id FETCH FIRST 50 PERCENT ROWS ONLY"));
       }
     }
 
-    @Test
-    @Disabled("待支持: STRAIGHT_JOIN 连接提示（MySQL）解析器不支持，待支持")
-    void straightJoinHint() throws Exception {
+    @Test void straightJoinHint() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("4", scalar(db, "SELECT COUNT(*) FROM userdb.users "
             + "STRAIGHT_JOIN orderdb.orders o ON o.user_id = userdb.users.id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: CAST(TRUE AS INT) 布尔转整数（MySQL 布尔即 tinyint 语义）"
-        + "校验器类型系统不支持，待支持")
-    void castBooleanToInteger() throws Exception {
+    @Test void castBooleanToInteger() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals("1,0", scalar(db, "SELECT CAST(TRUE AS INT), CAST(FALSE AS INT) "
+        assertEquals(List.of("1,0"), rows(db, "SELECT CAST(TRUE AS INT), CAST(FALSE AS INT) "
             + "FROM userdb.small LIMIT 1"));
       }
     }

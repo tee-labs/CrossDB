@@ -295,6 +295,176 @@ public final class CrossDbFunctions {
     return a != null ? a : b;
   }
 
+  /** LEFT(s, n)（MySQL/SQL Server）：左起 n 字符；n<=0 得空串、n 超长得整串。 */
+  public static String left(String s, BigDecimal n) {
+    if (s == null || n == null) {
+      return null;
+    }
+    int len = n.intValue();
+    return len <= 0 ? "" : s.substring(0, Math.min(len, s.length()));
+  }
+
+  /** RIGHT(s, n)（MySQL/SQL Server）：右起 n 字符；n<=0 得空串、n 超长得整串。 */
+  public static String right(String s, BigDecimal n) {
+    if (s == null || n == null) {
+      return null;
+    }
+    int len = n.intValue();
+    return len <= 0 ? "" : s.substring(Math.max(s.length() - len, 0));
+  }
+
+  /** LOCATE(substr, str[, start])（MySQL/PostgreSQL）：substr 在 str 中自 start
+   * （1 基）起首次出现位置，未找到得 0；start<1 得 0；任一 NULL 得 NULL。 */
+  public static Long locate2(String substr, String str) {
+    return locate(substr, str, 1L);
+  }
+
+  /** LOCATE(substr, str, start) 三参形态。 */
+  public static Long locate3(String substr, String str, BigDecimal start) {
+    return locate(substr, str, start == null ? null : start.longValue());
+  }
+
+  private static Long locate(String substr, String str, Long start) {
+    if (substr == null || str == null || start == null) {
+      return null;
+    }
+    if (start < 1) {
+      return 0L;
+    }
+    return (long) str.indexOf(substr, (int) (start - 1)) + 1;
+  }
+
+  /** MOD(a, b) 浮点语义修正实现：BigDecimal.remainder 与 Java {@code %} 同为
+   * 「商向零截断」语义（符号随被除数），标准/MySQL/PostgreSQL 一致；b=0 得 NULL
+   * （MySQL 语义）；任一 NULL 得 NULL。整数操作数仍走原生 MOD 不进本实现。 */
+  public static Double mod(Object a, Object b) {
+    if (a == null || b == null) {
+      return null;
+    }
+    try {
+      return number(a).remainder(number(b)).doubleValue();
+    } catch (ArithmeticException e) {
+      return null;   // 除数为 0：MySQL 返回 NULL
+    }
+  }
+
+  /** DIV 整除（MySQL）：商向零截断；除数为 0 得 NULL；任一 NULL 得 NULL。 */
+  public static Long idiv(Object a, Object b) {
+    if (a == null || b == null) {
+      return null;
+    }
+    try {
+      return number(a).divideToIntegralValue(number(b)).longValueExact();
+    } catch (ArithmeticException e) {
+      return null;   // 除数为 0 或商超 LONG
+    }
+  }
+
+  private static BigDecimal number(Object v) {
+    if (v instanceof BigDecimal bd) {
+      return bd;
+    }
+    if (v instanceof java.math.BigInteger bi) {
+      return new java.math.BigDecimal(bi);
+    }
+    if (v instanceof Double || v instanceof Float) {
+      return BigDecimal.valueOf(((Number) v).doubleValue());
+    }
+    if (v instanceof Number nu) {
+      return BigDecimal.valueOf(nu.longValue());
+    }
+    throw new IllegalArgumentException("要求数值操作数: " + v);
+  }
+
+  /** 位运算族（MySQL/PostgreSQL 操作符改写目标）：NULL 进 NULL 出，参数按 LONG。 */
+  public static Long bitAnd(Long a, Long b) {
+    return a == null || b == null ? null : a & b;
+  }
+
+  public static Long bitOr(Long a, Long b) {
+    return a == null || b == null ? null : a | b;
+  }
+
+  public static Long bitXor(Long a, Long b) {
+    return a == null || b == null ? null : a ^ b;
+  }
+
+  /** 一元按位取反（PostgreSQL {@code ~}）。 */
+  public static Long bitNot(Long a) {
+    return a == null ? null : ~a;
+  }
+
+  /** 左移 {@code a << n}（n>=64 得 0；n<=0 不移动）。 */
+  public static Long shl(Long a, Long n) {
+    if (a == null || n == null) {
+      return null;
+    }
+    if (n <= 0) {
+      return a;
+    }
+    return n >= 64 ? 0L : a << n;
+  }
+
+  /** 右移 {@code a >> n}（算术右移；移位超出 63 得 0/-1，负移位数不移动）。 */
+  public static Long shr(Long a, Long n) {
+    if (a == null || n == null) {
+      return null;
+    }
+    if (n <= 0) {
+      return a;
+    }
+    return n >= 64 ? (a < 0 ? -1L : 0L) : a >> n;
+  }
+
+  /** ADD_MONTHS(date, n)（Oracle）：DATE 承载约定为 epoch days（Integer）或
+   * java.sql.Date；n 可为负。NULL 进 NULL 出。 */
+  public static java.sql.Date addMonths(Object date, BigDecimal months) {
+    java.time.LocalDate d = toLocalDate(date);
+    if (d == null || months == null) {
+      return null;
+    }
+    return java.sql.Date.valueOf(d.plusMonths(months.longValue()));
+  }
+
+  /** MONTHS_BETWEEN(d1, d2)（Oracle 语义）：同为月末日或同 day-of-month 时为整月
+   * 差；否则带 (d1.day - d2.day)/31 分数部分（保留 6 位标度）。 */
+  public static BigDecimal monthsBetween(Object a, Object b) {
+    java.time.LocalDate d1 = toLocalDate(a);
+    java.time.LocalDate d2 = toLocalDate(b);
+    if (d1 == null || d2 == null) {
+      return null;
+    }
+    long months = (d1.getYear() - d2.getYear()) * 12L + d1.getMonthValue() - d2.getMonthValue();
+    boolean whole = d1.getDayOfMonth() == d2.getDayOfMonth()
+        || (isMonthEnd(d1) && isMonthEnd(d2));
+    if (whole) {
+      return BigDecimal.valueOf(months);
+    }
+    return BigDecimal.valueOf(months).add(
+        BigDecimal.valueOf(d1.getDayOfMonth() - d2.getDayOfMonth())
+            .divide(BigDecimal.valueOf(31), 6, java.math.RoundingMode.HALF_UP));
+  }
+
+  private static java.time.LocalDate toLocalDate(Object v) {
+    if (v == null) {
+      return null;
+    }
+    if (v instanceof Integer days) {
+      return java.time.LocalDate.ofEpochDay(days);
+    }
+    if (v instanceof java.sql.Date d) {
+      return d.toLocalDate();
+    }
+    if (v instanceof java.time.LocalDate d) {
+      return d;
+    }
+    throw new IllegalArgumentException("日期函数不支持入参类型 " + v.getClass().getName());
+  }
+
+  private static boolean isMonthEnd(java.time.LocalDate d) {
+    return d.getDayOfMonth() == d.lengthOfMonth();
+  }
+
   /** TIMESTAMPDIFF(unit, a, b)：完整单位数差值（MySQL 语义），实现见
    * {@link CrossDbAggregates#timestampDiff}。 */
   public static Long timestampDiff(String unit, Object a, Object b) {
