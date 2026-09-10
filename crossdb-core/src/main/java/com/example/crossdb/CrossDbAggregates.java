@@ -17,7 +17,7 @@ import java.util.TreeSet;
  *
  * <p>全部按 Calcite UDAF 约定组织：类内提供 {@code init/add/merge/result} 静态方法，
  * 由 {@link org.apache.calcite.schema.impl.AggregateFunctionImpl} 反射接入；
- * 经 SqlRewrites 在解析期把标准语法形态改写到对应实现上（CROSSDB_ 前缀，SQL 不可见）。
+ * 经解析期改写（SqlRewrites 一族：LocalOperators 注册、SqlTreeRewrites 挂载）把标准语法形态改写到对应实现上（CROSSDB_ 前缀，SQL 不可见）。
  *
  * <p>语义约定：
  * <ul>

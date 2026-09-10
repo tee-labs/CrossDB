@@ -77,7 +77,7 @@ public class CrossDb implements AutoCloseable {
   private boolean safeMode;
   /** 已注册源库的列类型目录（register 后失效、plan 时惰性重建；供解析期
    * 类型感知改写：DATE±整数、CAST(布尔 AS 数值)、MOD 浮点修正）。 */
-  private SqlRewrites.ColumnHints columnHints;
+  private ColumnHints columnHints;
 
   public CrossDb() throws SQLException {
     this(DEFAULT_FETCH_SIZE, DEFAULT_ROW_LIMIT, DEFAULT_BIND_BATCH_SIZE,
@@ -183,7 +183,7 @@ public class CrossDb implements AutoCloseable {
         // 操作符表：标准表 + 本地 UDF（方言兼容函数与 SIMILAR TO 改写目标）
         .operatorTable(SqlOperatorTables.chain(
             org.apache.calcite.sql.fun.SqlStdOperatorTable.instance(),
-            SqlOperatorTables.of(SqlRewrites.OPERATORS)))
+            SqlOperatorTables.of(LocalOperators.OPERATORS)))
         .parserConfig(SqlParser.config().withLex(Lex.MYSQL)
             // LENIENT：放行 CROSS/OUTER APPLY（SQL Server 风格相关派生表）；
             // 对既有语法仅为放宽（!= / LIMIT a,b 等在 LENIENT 下同样可用）
@@ -195,7 +195,7 @@ public class CrossDb implements AutoCloseable {
     RelNode best;
     try {
       if (columnHints == null) {
-        columnHints = SqlRewrites.ColumnHints.scan(sources.values());
+        columnHints = ColumnHints.scan(sources.values());
       }
       SqlNode parsed = planner.parse(SqlRewrites.preprocess(sql));
       parsed = SqlRewrites.rewrite(parsed, connection.getRootSchema(),
