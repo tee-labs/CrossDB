@@ -195,9 +195,14 @@ public class CrossDb implements AutoCloseable {
     RelNode best;
     try {
       if (columnHints == null) {
-        columnHints = ColumnHints.scan(sources.values());
+        columnHints = ColumnHints.scanSources(sources.entrySet().stream()
+            .map(en -> Map.entry(en.getKey(), (javax.sql.DataSource) en.getValue())).toList());
       }
-      SqlNode parsed = planner.parse(SqlRewrites.preprocess(sql));
+      String preprocessed = SqlRewrites.preprocess(sql, columnHints);
+      if (Boolean.getBoolean("crossdb.debug")) {
+        System.err.println("crossdb.debug preprocessed = " + preprocessed);
+      }
+      SqlNode parsed = planner.parse(preprocessed);
       parsed = SqlRewrites.rewrite(parsed, connection.getRootSchema(),
           connection.getTypeFactory(), columnHints);
       checkReadOnly(parsed);
@@ -213,6 +218,10 @@ public class CrossDb implements AutoCloseable {
             org.apache.calcite.rel.RelCollations.EMPTY);
       }
       best = planner.transform(0, required, root.rel);
+      // 嵌套 JdbcAggregate 修正（上游 JDBC 适配器缺陷）：外层聚合随 JdbcAggregateRule
+      // 下推后，JdbcImplementor 会把两层聚合内联渲染为嵌套聚合 SQL（SUM(SUM(x))），
+      // H2 等源库拒绝执行。把外层聚合链改挂本地 Enumerable（内层聚合仍下推）。
+      best = fixNestedJdbcAggregates(best);
       // 优化后行型可能宽于验证后的输出行型（如 ORDER BY 引用未 SELECT 的列/表达式键，
       // 排序列会留在计划输出里），按 root.fields 补最终投影裁掉，避免输出列泄漏；
       // 字段名保真同理：JDBC 下推会把投影别名吸收进源库扫描（回退底层列名），
@@ -259,6 +268,153 @@ public class CrossDb implements AutoCloseable {
   }
 
   // SIMILAR TO 与其余方言兼容语法的解析期改写见 SqlRewrites。
+
+  /** 逻辑层注入聚合下推屏障（见 plan 调用处注释）：自底向上递归，遇到「Aggregate
+   * 之下（穿过 Project）仍是 Aggregate」时在外层与内层之间插 EXCEPT ALL 空 Values
+   * 恒等屏障。无法安全重建的节点形态（copy 不支持）原样保留——常见形态（根级/
+   * 简单嵌套）均可覆盖。 */
+  // SIMILAR TO 与其余方言兼容语法的解析期改写见 SqlRewrites。
+
+  /** 嵌套 JdbcAggregate 修正（见 plan 调用处注释）：自底向上递归；命中
+   * JdbcAggregate(外层) → JdbcProject* → JdbcAggregate(内层) 时，内层之下原样
+   * 保留（仍下推源库），其上加转换器，外层的投影链与聚合改挂本地 Enumerable 执行。
+   * 父链按需重建（JDBC 节点遇 Enumerable 输入即整体本地化），不支持的形态维持
+   * 原计划（该查询将以上游嵌套聚合错误暴露）。 */
+  private static RelNode fixNestedJdbcAggregates(RelNode n) {
+    List<RelNode> inputs = n.getInputs();
+    List<RelNode> newInputs = new ArrayList<>(inputs.size());
+    boolean changed = false;
+    for (RelNode in : inputs) {
+      RelNode r = fixNestedJdbcAggregates(in);
+      newInputs.add(r);
+      changed |= r != in;
+    }
+    RelNode node = n;
+    if (changed) {
+      RelNode rebuilt = withNewInputs(n, newInputs);
+      if (rebuilt == null) {
+        return n;   // 无法安全重建：放弃修正（维持原计划，错误如实暴露）
+      }
+      node = rebuilt;
+    }
+    if (node instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcAggregate outer) {
+      RelNode chain = outer.getInput();
+      List<org.apache.calcite.adapter.jdbc.JdbcRules.JdbcProject> projects =
+          new ArrayList<>();
+      RelNode cur = chain;
+      while (cur instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcProject p) {
+        projects.add(p);
+        cur = p.getInput();
+      }
+      if (cur instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcAggregate) {
+        try {
+          RelNode input = new LocalJdbcConverter(cur.getCluster(),
+              cur.getTraitSet().replace(EnumerableConvention.INSTANCE), cur);
+          org.apache.calcite.rex.RexBuilder rex = input.getCluster().getRexBuilder();
+          for (int i = projects.size() - 1; i >= 0; i--) {
+            org.apache.calcite.adapter.jdbc.JdbcRules.JdbcProject p = projects.get(i);
+            input = org.apache.calcite.adapter.enumerable.EnumerableCalc.create(input,
+                org.apache.calcite.rex.RexProgram.create(p.getInput().getRowType(),
+                    p.getProjects(), null, p.getRowType(), rex));
+          }
+          return new LocalEnumerableAggregate(outer.getCluster(),
+              outer.getCluster().traitSetOf(EnumerableConvention.INSTANCE),
+              input, outer.getGroupSet(), outer.getGroupSets(), outer.getAggCallList());
+        } catch (Exception | AssertionError e) {
+          if (Boolean.getBoolean("crossdb.debug")) {
+            System.err.println("fixNestedJdbcAggregates: 重建外层聚合失败");
+            e.printStackTrace(System.err);
+          }
+          return node;   // 重建失败：维持原计划（嵌套聚合错误如实暴露）
+        }
+      }
+    }
+    return node;
+  }
+
+  /** 以新输入重建节点（父子链修复用）；不支持的形态返回 null。JDBC 子树的输入
+   * 变为 Enumerable 时，该 JDBC 节点与其上的转换器一并本地化（否则渲染器会把
+   * 混合约定子树再拼成非法 SQL）。 */
+  private static RelNode withNewInputs(RelNode n, List<RelNode> inputs) {
+    try {
+      boolean childBecameEnum = inputs.stream().anyMatch(
+          in -> in.getTraitSet().getConvention() == EnumerableConvention.INSTANCE);
+      if (n instanceof JdbcToEnumerableConverter && inputs.size() == 1 && childBecameEnum) {
+        return inputs.get(0);   // 子树已 Enumerable：转换器摘除
+      }
+      if (childBecameEnum && n.getConvention() instanceof org.apache.calcite.adapter.jdbc.JdbcConvention) {
+        if (n instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcProject p) {
+          return org.apache.calcite.adapter.enumerable.EnumerableCalc.create(inputs.get(0),
+              org.apache.calcite.rex.RexProgram.create(p.getInput().getRowType(),
+                  p.getProjects(), null, p.getRowType(),
+                  n.getCluster().getRexBuilder()));
+        }
+        if (n instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcFilter f) {
+          return org.apache.calcite.adapter.enumerable.EnumerableCalc.create(inputs.get(0),
+              org.apache.calcite.rex.RexProgram.create(f.getInput().getRowType(), null,
+                  f.getCondition(), f.getRowType(), n.getCluster().getRexBuilder()));
+        }
+        if (n instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcSort s) {
+          return org.apache.calcite.adapter.enumerable.EnumerableSort.create(inputs.get(0),
+              s.getCollation(), s.offset, s.fetch);
+        }
+        if (n instanceof org.apache.calcite.adapter.jdbc.JdbcRules.JdbcAggregate a) {
+          return new LocalEnumerableAggregate(a.getCluster(),
+              a.getCluster().traitSetOf(EnumerableConvention.INSTANCE), inputs.get(0),
+              a.getGroupSet(), a.getGroupSets(), a.getAggCallList());
+        }
+        return null;   // JdbcJoin 等混合形态：放弃修正
+      }
+      if (n instanceof org.apache.calcite.rel.core.Sort s) {
+        return s.copy(s.getTraitSet(), inputs.get(0), s.getCollation(), s.offset, s.fetch);
+      }
+      if (n instanceof org.apache.calcite.adapter.enumerable.EnumerableCalc c) {
+        return org.apache.calcite.adapter.enumerable.EnumerableCalc
+            .create(inputs.get(0), c.getProgram());
+      }
+      if (n instanceof org.apache.calcite.adapter.enumerable.EnumerableLimit l) {
+        return org.apache.calcite.adapter.enumerable.EnumerableLimit
+            .create(inputs.get(0), l.offset, l.fetch);
+      }
+      if (n instanceof org.apache.calcite.adapter.enumerable.EnumerableAggregate a) {
+        return new LocalEnumerableAggregate(a.getCluster(), a.getTraitSet(), inputs.get(0),
+            a.getGroupSet(), a.getGroupSets(), a.getAggCallList());
+      }
+      if (n instanceof Join j) {
+        return j.copy(j.getTraitSet(), j.getCondition(), inputs.get(0), inputs.get(1),
+            j.getJoinType(), j.isSemiJoinDone());
+      }
+      return n.copy(n.getTraitSet(), inputs);
+    } catch (Exception | AssertionError e) {
+      if (Boolean.getBoolean("crossdb.debug")) {
+        System.err.println("fixNestedJdbcAggregates: 无法重建 " + n.getClass().getSimpleName());
+      }
+      return null;
+    }
+  }
+
+  /** 命名包装：JdbcToEnumerableConverter 的可实例化子类（protected 构造器开放；
+   * 匿名类会让 explain 渲染成无意义序号名）。 */
+  private static final class LocalJdbcConverter extends JdbcToEnumerableConverter {
+    LocalJdbcConverter(org.apache.calcite.plan.RelOptCluster cluster,
+        org.apache.calcite.plan.RelTraitSet traits, RelNode input) {
+      super(cluster, traits, input);
+    }
+  }
+
+  /** 命名包装：EnumerableAggregate 的可实例化子类（无静态工厂，protected 构造器）。 */
+  private static final class LocalEnumerableAggregate
+      extends org.apache.calcite.adapter.enumerable.EnumerableAggregate {
+    LocalEnumerableAggregate(org.apache.calcite.plan.RelOptCluster cluster,
+        org.apache.calcite.plan.RelTraitSet traits, RelNode input,
+        org.apache.calcite.util.ImmutableBitSet groupSet,
+        java.util.List<org.apache.calcite.util.ImmutableBitSet> groupSets,
+        java.util.List<org.apache.calcite.rel.core.AggregateCall> aggCalls)
+        throws org.apache.calcite.rel.InvalidRelException {
+      super(cluster, traits, input, groupSet, groupSets, aggCalls);
+    }
+  }
+
   /** 防呆：源库拉取子树不允许只有 Scan/Filter/Project/无 LIMIT Sort 链（全表拉取）。
    * Bind Join 内表例外——其 SQL 运行时必带 key IN 过滤；Aggregate 视为有归约。 */
   private void checkSafe(RelNode plan) throws CrossDbUnsafeQueryException {

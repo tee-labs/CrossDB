@@ -41,6 +41,17 @@ final class LocalOperators {
           b -> b.getTypeFactory().createSqlType(SqlTypeName.VARCHAR),
           SqlTypeTransforms.TO_NULLABLE);
 
+  /** 数值/布尔返回的本地 UDF 必须 FORCE_NULLABLE：TO_NULLABLE 仅在操作数可空时
+   * 置空，字面量参数的调用会被推导为 NOT NULL，生成代码对 UDF 返回值无条件拆箱
+   * （.intValue()/.doubleValue()），而本地实现对非法输入返回 NULL（三值逻辑），
+   * 拆箱即 NPE。 */
+  private static SqlReturnTypeInference forced(SqlTypeName type) {
+    return new SqlTypeTransformCascade(
+        b -> b.getTypeFactory().createSqlType(type), SqlTypeTransforms.FORCE_NULLABLE);
+  }
+
+  private static final SqlReturnTypeInference BIGINT_FORCED = forced(SqlTypeName.BIGINT);
+
   static final SqlUserDefinedFunction SIMILAR_FN_2 =
       similarFn("CROSSDB_SIMILAR", 2);
   static final SqlUserDefinedFunction SIMILAR_FN_3 =
@@ -85,14 +96,14 @@ final class LocalOperators {
   static final SqlUserDefinedFunction TIMESTAMPDIFF_FN =
       udf("CROSSDB_TIMESTAMPDIFF", "timestampDiff",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.ANY, SqlTypeFamily.ANY),
-          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.ANY, BIGINT_FORCED);
 
   /** MySQL REGEXP/RLIKE：Java 正则任意位置匹配，本地求值（解析器仅认 RLIKE 关键字，
    * REGEXP 由语句级预处理替换为 RLIKE 后挂载到此实现）。 */
   static final SqlUserDefinedFunction REGEXP_FN =
       udf("CROSSDB_REGEXP", "regexp",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING), SqlTypeName.VARCHAR,
-          ReturnTypes.BOOLEAN_NULLABLE);
+          forced(SqlTypeName.BOOLEAN));
   static final SqlUserDefinedFunction TRANSLATE_FN =
       udf("CROSSDB_TRANSLATE", "translate",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.STRING),
@@ -109,47 +120,104 @@ final class LocalOperators {
   // ANY 类型优先级断言（SqlTypeExplicitPrecedenceList）
   static final SqlUserDefinedFunction LOCATE2_FN =
       udf("CROSSDB_LOCATE2", "locate2", List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING),
-          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.ANY, BIGINT_FORCED);
   static final SqlUserDefinedFunction LOCATE3_FN =
       udf("CROSSDB_LOCATE3", "locate3",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
-          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.ANY, BIGINT_FORCED);
   /** MOD 浮点语义修正（仅浮点操作数改写挂载；整数走原生 MOD 保下推）。 */
   static final SqlUserDefinedFunction MOD_FN =
       udf("CROSSDB_MOD", "mod", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
-          SqlTypeName.ANY, ReturnTypes.DOUBLE_NULLABLE);
+          SqlTypeName.ANY, forced(SqlTypeName.DOUBLE));
   /** DIV 整除（MySQL 操作符改写目标）。 */
   static final SqlUserDefinedFunction IDIV_FN =
       udf("CROSSDB_IDIV", "idiv", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
-          SqlTypeName.ANY, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.ANY, BIGINT_FORCED);
   /** Oracle 日期函数：本地实现（H2 亦同名可下推；ADD_MONTHS 返回类型随首参 DATE）。 */
   static final SqlUserDefinedFunction ADD_MONTHS_FN =
       udf("ADD_MONTHS", "addMonths", List.of(SqlTypeFamily.ANY, SqlTypeFamily.NUMERIC),
           SqlTypeName.ANY, ARG0_NULLABLE);
   static final SqlUserDefinedFunction MONTHS_BETWEEN_FN =
       udf("MONTHS_BETWEEN", "monthsBetween", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
-          SqlTypeName.ANY, new SqlTypeTransformCascade(
-              b -> b.getTypeFactory().createSqlType(SqlTypeName.DECIMAL),
-              SqlTypeTransforms.TO_NULLABLE));
+          SqlTypeName.ANY, forced(SqlTypeName.DECIMAL));
+  /** CONCAT_WS 可变参 4/5 元形态（2/3 元以 CONCAT_WS 名直接注册；同名多元数并存
+   * 会触发优先级断言，故 4/5 元以 CROSSDB_ 前缀由解析期改写挂载）。 */
+  static final SqlUserDefinedFunction CONCAT_WS4_FN =
+      udf("CROSSDB_CONCAT_WS4", "concatWs4", List.of(SqlTypeFamily.STRING,
+          SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  static final SqlUserDefinedFunction CONCAT_WS5_FN =
+      udf("CROSSDB_CONCAT_WS5", "concatWs5", List.of(SqlTypeFamily.STRING,
+          SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+
+  /** INSTR(str, substr[, start])（MySQL/Oracle）→ 本地实现（参数序与 LOCATE 相反）。 */
+  static final SqlUserDefinedFunction INSTR2_FN =
+      udf("CROSSDB_INSTR2", "instr2", List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING),
+          SqlTypeName.ANY, BIGINT_FORCED);
+  static final SqlUserDefinedFunction INSTR3_FN =
+      udf("CROSSDB_INSTR3", "instr3",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, BIGINT_FORCED);
+  /** SUBSTRING_INDEX(s, delim, n)（MySQL）→ 本地实现。 */
+  static final SqlUserDefinedFunction SUBSTRING_INDEX_FN =
+      udf("CROSSDB_SUBSTRING_INDEX", "substringIndex",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.NUMERIC),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  /** DATE_FORMAT(ts, fmt)（MySQL）→ 本地实现（TIMESTAMP/DATE 承载约定同引擎）。 */
+  static final SqlUserDefinedFunction DATE_FORMAT_FN =
+      udf("CROSSDB_DATE_FORMAT", "dateFormat",
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.STRING), SqlTypeName.ANY,
+          VARCHAR_NULLABLE);
+  /** REGEXP_REPLACE(s, pat, repl) 3 参全局替换（MySQL ci 语义）→ 本地实现。 */
+  static final SqlUserDefinedFunction REGEXP_REPLACE3_FN =
+      udf("CROSSDB_REGEXP_REPLACE3", "regexpReplace3",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.STRING),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  /** TO_CHAR(date[, fmt])（Oracle）→ 本地实现。 */
+  static final SqlUserDefinedFunction TO_CHAR2_FN =
+      udf("CROSSDB_TO_CHAR", "toChar", List.of(SqlTypeFamily.ANY, SqlTypeFamily.STRING),
+          SqlTypeName.ANY, VARCHAR_NULLABLE);
+  /** NEXT_DAY(date, dow)（Oracle）→ 本地实现。 */
+  static final SqlUserDefinedFunction NEXT_DAY_FN =
+      udf("CROSSDB_NEXT_DAY", "nextDay", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, ARG0_NULLABLE);
+  /** MySQL 逻辑 XOR 操作符改写目标（文本级操作数链扫描挂载）。 */
+  static final SqlUserDefinedFunction XOR_FN =
+      udf("CROSSDB_XOR", "xor", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
+          SqlTypeName.ANY, forced(SqlTypeName.INTEGER));
+  /** TRY_CAST 解析失败转 NULL 族：按目标类型独立命名（挂载层从类型名编码）。 */
+  static final SqlUserDefinedFunction TRY_INT_FN =
+      udf("CROSSDB_TRY_INT", "tryInt", List.of(SqlTypeFamily.ANY), SqlTypeName.ANY,
+          forced(SqlTypeName.INTEGER));
+  static final SqlUserDefinedFunction TRY_BIGINT_FN =
+      udf("CROSSDB_TRY_BIGINT", "tryBigint", List.of(SqlTypeFamily.ANY), SqlTypeName.ANY,
+          BIGINT_FORCED);
+  static final SqlUserDefinedFunction TRY_DOUBLE_FN =
+      udf("CROSSDB_TRY_DOUBLE", "tryDouble", List.of(SqlTypeFamily.ANY), SqlTypeName.ANY,
+          forced(SqlTypeName.DOUBLE));
+  static final SqlUserDefinedFunction TRY_DECIMAL_FN =
+      udf("CROSSDB_TRY_DECIMAL", "tryDecimal", List.of(SqlTypeFamily.ANY), SqlTypeName.ANY,
+          forced(SqlTypeName.DECIMAL));
   /** 位运算族（& | ^ ~ << >> 操作符改写目标，MySQL/PostgreSQL）。 */
   static final SqlUserDefinedFunction BITAND_FN =
       udf("CROSSDB_BITAND", "bitAnd", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
   static final SqlUserDefinedFunction BITOR_FN =
       udf("CROSSDB_BITOR", "bitOr", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
   static final SqlUserDefinedFunction BITXOR_FN =
       udf("CROSSDB_BITXOR", "bitXor", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
   static final SqlUserDefinedFunction BITNOT_FN =
       udf("CROSSDB_BITNOT", "bitNot", List.of(SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
   static final SqlUserDefinedFunction SHL_FN =
       udf("CROSSDB_SHL", "shl", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
   static final SqlUserDefinedFunction SHR_FN =
       udf("CROSSDB_SHR", "shr", List.of(SqlTypeFamily.NUMERIC, SqlTypeFamily.NUMERIC),
-          SqlTypeName.BIGINT, ReturnTypes.BIGINT_NULLABLE);
+          SqlTypeName.BIGINT, BIGINT_FORCED);
 
   static final SqlUserDefinedAggFunction LISTAGG_DISTINCT_FN =
       aggFn("CROSSDB_LISTAGG", VARCHAR_NULLABLE,
@@ -196,13 +264,20 @@ final class LocalOperators {
   static final SqlUserDefinedAggFunction LAST_VALUE_NN_FN =
       aggFn("CROSSDB_LAST_VALUE_NN", ANY_NULLABLE,
           List.of(SqlTypeFamily.ANY), CrossDbAggregates.LastNonNull.class);
+  /** ARG_MIN/ARG_MAX(v, o)（DuckDB/Trino）：按序键取锚定值。 */
+  static final SqlUserDefinedAggFunction ARG_MIN_FN =
+      aggFn("CROSSDB_ARG_MIN", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY), CrossDbAggregates.ArgMin.class);
+  static final SqlUserDefinedAggFunction ARG_MAX_FN =
+      aggFn("CROSSDB_ARG_MAX", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY), CrossDbAggregates.ArgMax.class);
 
   /** 注册进引擎操作符表的本地 UDAF（名字 SQL 不可见，仅由解析期改写挂载）。 */
   private static final List<org.apache.calcite.sql.SqlOperator> AGGS = List.of(
       LISTAGG_DISTINCT_FN, MEDIAN_FN, PERCENTILE_CONT_FN,
       NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN, BOOL_AND_FN, BOOL_OR_FN,
       PERCENTILE_DISC_FN, ARRAY_AGG_FN, ANY_VALUE_FN, MODE_FN, COUNT_DISTINCT_FN,
-      FIRST_VALUE_NN_FN, LAST_VALUE_NN_FN);
+      FIRST_VALUE_NN_FN, LAST_VALUE_NN_FN, ARG_MIN_FN, ARG_MAX_FN);
 
   private static SqlUserDefinedAggFunction aggFn(String name, SqlReturnTypeInference ret,
       List<SqlTypeFamily> fams, Class<?> impl) {
@@ -258,6 +333,10 @@ final class LocalOperators {
       TIMESTAMPDIFF_FN,
       LEFT_FN, RIGHT_FN, LOCATE2_FN, LOCATE3_FN, MOD_FN, IDIV_FN,
       ADD_MONTHS_FN, MONTHS_BETWEEN_FN,
+      INSTR2_FN, INSTR3_FN, SUBSTRING_INDEX_FN, DATE_FORMAT_FN, REGEXP_REPLACE3_FN,
+      CONCAT_WS4_FN, CONCAT_WS5_FN,
+      TO_CHAR2_FN, NEXT_DAY_FN, XOR_FN,
+      TRY_INT_FN, TRY_BIGINT_FN, TRY_DOUBLE_FN, TRY_DECIMAL_FN,
       BITAND_FN, BITOR_FN, BITXOR_FN, BITNOT_FN, SHL_FN, SHR_FN);
   /** 全部本地操作符（标量 UDF + 聚合/窗口 UDAF）：注册进引擎操作符表。 */
   static final List<org.apache.calcite.sql.SqlOperator> OPERATORS;
@@ -318,12 +397,23 @@ final class LocalOperators {
       case "concat3" -> new Class<?>[]{String.class, String.class, String.class};
       case "concatWs2" -> new Class<?>[]{String.class, Object.class, Object.class};
       case "concatWs3" -> new Class<?>[]{String.class, Object.class, Object.class, Object.class};
+      case "concatWs4" -> new Class<?>[]{String.class, Object.class, Object.class, Object.class};
+      case "concatWs5" -> new Class<?>[]{String.class, Object.class, Object.class, Object.class, Object.class};
       case "reverse" -> new Class<?>[]{String.class};
       case "translate" -> new Class<?>[]{String.class, String.class, String.class};
       case "soundex", "ltrim", "rtrim" -> new Class<?>[]{String.class};
       case "left", "right" -> new Class<?>[]{String.class, BigDecimal.class};
       case "locate2" -> new Class<?>[]{String.class, String.class};
       case "locate3" -> new Class<?>[]{String.class, String.class, BigDecimal.class};
+      case "instr2" -> new Class<?>[]{String.class, String.class};
+      case "instr3" -> new Class<?>[]{String.class, String.class, BigDecimal.class};
+      case "substringIndex" -> new Class<?>[]{String.class, String.class, BigDecimal.class};
+      case "dateFormat" -> new Class<?>[]{Object.class, String.class};
+      case "regexpReplace3" -> new Class<?>[]{String.class, String.class, String.class};
+      case "toChar" -> new Class<?>[]{Object.class, String.class};
+      case "nextDay" -> new Class<?>[]{Object.class, Object.class};
+      case "xor" -> new Class<?>[]{Object.class, Object.class};
+      case "tryInt", "tryBigint", "tryDouble", "tryDecimal" -> new Class<?>[]{Object.class};
       case "mod", "idiv" -> new Class<?>[]{Object.class, Object.class};
       case "addMonths" -> new Class<?>[]{Object.class, BigDecimal.class};
       case "monthsBetween" -> new Class<?>[]{Object.class, Object.class};

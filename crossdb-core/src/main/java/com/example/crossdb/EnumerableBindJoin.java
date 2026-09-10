@@ -46,6 +46,9 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
   final String[] keyCols;
   final int[] leftKeys;
   final int[] rightKeys;
+  /** 内表全部列的 SqlTypeName 名（DATE/TIMESTAMP 列的绑参/回读承载转换，
+   * 见 BindJoinExec.bindValue/readValue；key 列按 rightKeys 下标取用）。 */
+  final String[] colTypes;
   final int rightFieldCount;
   final int batchSize;
   final int parallelism;
@@ -55,15 +58,16 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
 
   private EnumerableBindJoin(RelOptCluster cluster, RelTraitSet traits, RelNode left,
       RelNode right, RexNode condition, Set<CorrelationId> variablesSet, String schemaName,
-      String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, int rightFieldCount,
-      int batchSize, int parallelism, boolean tupleIn, boolean sortedByKey, int leftWidth,
-      JoinRelType joinType) {
+      String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, String[] colTypes,
+      int rightFieldCount, int batchSize, int parallelism, boolean tupleIn,
+      boolean sortedByKey, int leftWidth, JoinRelType joinType) {
     super(cluster, traits, ImmutableList.of(), left, right, condition, variablesSet, joinType);
     this.schemaName = schemaName;
     this.sqlPrefix = sqlPrefix;
     this.keyCols = keyCols;
     this.leftKeys = leftKeys;
     this.rightKeys = rightKeys;
+    this.colTypes = colTypes;
     this.rightFieldCount = rightFieldCount;
     this.batchSize = batchSize;
     this.parallelism = parallelism;
@@ -76,11 +80,19 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
       String schemaName, String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys,
       int rightFieldCount, int batchSize, int parallelism, boolean tupleIn,
       boolean sortedByKey, JoinRelType joinType) {
+    return create(left, right, condition, schemaName, sqlPrefix, keyCols, leftKeys, rightKeys,
+        null, rightFieldCount, batchSize, parallelism, tupleIn, sortedByKey, joinType);
+  }
+
+  static EnumerableBindJoin create(RelNode left, RelNode right, RexNode condition,
+      String schemaName, String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys,
+      String[] colTypes, int rightFieldCount, int batchSize, int parallelism, boolean tupleIn,
+      boolean sortedByKey, JoinRelType joinType) {
     RelOptCluster cluster = left.getCluster();
     return new EnumerableBindJoin(cluster,
         cluster.traitSetOf(EnumerableConvention.INSTANCE),
         left, right, condition, ImmutableSet.of(), schemaName, sqlPrefix, keyCols, leftKeys,
-        rightKeys, rightFieldCount, batchSize, parallelism, tupleIn, sortedByKey,
+        rightKeys, colTypes, rightFieldCount, batchSize, parallelism, tupleIn, sortedByKey,
         left.getRowType().getFieldCount(), joinType);
   }
 
@@ -94,8 +106,8 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
     // 进而在其上叠加 JdbcProject/JdbcFilter 生成不可实现的计划。
     return new EnumerableBindJoin(getCluster(), traitSet.replace(EnumerableConvention.INSTANCE),
         left, right, condition, variablesSet, schemaName, sqlPrefix, keyCols, leftKeys,
-        rightKeys, rightFieldCount, batchSize, parallelism, tupleIn, sortedByKey, leftWidth,
-        joinType);
+        rightKeys, colTypes, rightFieldCount, batchSize, parallelism, tupleIn, sortedByKey,
+        leftWidth, joinType);
   }
 
   /** RIGHT 时子节点已交换为 [右表 ++ 左表]，行型按原始 [左 ++ 右] 恢复（左表可空）。 */
@@ -198,6 +210,8 @@ class EnumerableBindJoin extends Join implements EnumerableRel {
         constantArray(String.class, keyCols),
         constantArray(int.class, leftKeys),
         constantArray(int.class, rightKeys),
+        colTypes == null ? Expressions.constant(null, String[].class)
+            : constantArray(String.class, colTypes),
         Expressions.constant(rightFieldCount),
         Expressions.constant(batchSize),
         Expressions.constant(parallelism),

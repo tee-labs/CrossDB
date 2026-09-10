@@ -568,14 +568,97 @@ public final class CrossDbAggregates {
     }
   }
 
+  // ---------- ARG_MIN(v, o) / ARG_MAX(v, o)（DuckDB/Trino） ----------
+
+  /** 极值锚定状态：按序键 o 追踪最值及其锚定值 v（并列取首见，保证确定性）。 */
+  public static final class ArgExtremumState {
+    Object value;
+    boolean has;
+    Object bestOrder;
+  }
+
+  /** CROSSDB_ARG_MIN：返回序键最小行的 v（跳过 NULL 序键；全 NULL/空组返回 NULL）。 */
+  public static final class ArgMin {
+    private ArgMin() {}
+
+    public static ArgExtremumState init() {
+      return new ArgExtremumState();
+    }
+
+    public static ArgExtremumState add(ArgExtremumState s, Object v, Object o) {
+      if (o == null) {
+        return s;
+      }
+      if (!s.has || compare(o, s.bestOrder) < 0) {
+        s.value = v;
+        s.bestOrder = o;
+        s.has = true;
+      }
+      return s;
+    }
+
+    public static ArgExtremumState merge(ArgExtremumState a, ArgExtremumState b) {
+      if (!b.has) {
+        return a;
+      }
+      if (!a.has || compare(b.bestOrder, a.bestOrder) < 0) {
+        return b;
+      }
+      return a;
+    }
+
+    public static Object result(ArgExtremumState s) {
+      return s.has ? s.value : null;
+    }
+  }
+
+  /** CROSSDB_ARG_MAX：返回序键最大行的 v。 */
+  public static final class ArgMax {
+    private ArgMax() {}
+
+    public static ArgExtremumState init() {
+      return new ArgExtremumState();
+    }
+
+    public static ArgExtremumState add(ArgExtremumState s, Object v, Object o) {
+      if (o == null) {
+        return s;
+      }
+      if (!s.has || compare(o, s.bestOrder) > 0) {
+        s.value = v;
+        s.bestOrder = o;
+        s.has = true;
+      }
+      return s;
+    }
+
+    public static ArgExtremumState merge(ArgExtremumState a, ArgExtremumState b) {
+      if (!b.has) {
+        return a;
+      }
+      if (!a.has || compare(b.bestOrder, a.bestOrder) > 0) {
+        return b;
+      }
+      return a;
+    }
+
+    public static Object result(ArgExtremumState s) {
+      return s.has ? s.value : null;
+    }
+  }
+
+  @SuppressWarnings({"unchecked", "rawtypes"})
+  private static int compare(Object a, Object b) {
+    return ((Comparable) a).compareTo(b);
+  }
+
   // ---------- TIMESTAMPDIFF(unit, a, b)（标量） ----------
 
   /** 完整单位数差值（MySQL 语义）：SEC/MIN/HOUR/DAY/WEEK 按时间长度整除；
    * MONTH/QUARTER/YEAR 按日历完整跨越计数。NULL 入参返回 NULL。
    * 时间承载约定与 CROSSDB_FLOOR/CEIL 一致（Long epoch millis / Timestamp /
    * LocalDateTime / DATE epoch days 均可）。 */
-  public static Long timestampDiff(String unit, Object a, Object b) {
-    if (unit == null || a == null || b == null) {
+  public static Long timestampDiff(String unit, Object a, Object b) {    if (unit == null || a == null || b == null) {
       return null;
     }
     LocalDateTime x = toDateTime(a);
@@ -603,8 +686,13 @@ public final class CrossDbAggregates {
     return java.lang.Math.floorDiv(a, b);
   }
 
-  /** 入参统一转 LocalDateTime：按 UTC 墙钟解释 epoch millis（引擎承载约定）。 */
+  /** 入参统一转 LocalDateTime：按 UTC 墙钟解释 epoch millis（引擎承载约定）。
+   * Integer 是 DATE（epoch days）承载——必须先于 Number（TIMESTAMP 毫秒）分支
+   * 判定，否则 DATE 参数被误读为毫秒。 */
   private static LocalDateTime toDateTime(Object v) {
+    if (v instanceof Integer days) {
+      return java.time.LocalDate.ofEpochDay(days).atStartOfDay();
+    }
     if (v instanceof Number num) {
       return Instant.ofEpochMilli(num.longValue()).atZone(ZoneOffset.UTC).toLocalDateTime();
     }
@@ -616,9 +704,6 @@ public final class CrossDbAggregates {
     }
     if (v instanceof java.util.Date d) {
       return Instant.ofEpochMilli(d.getTime()).atZone(ZoneOffset.UTC).toLocalDateTime();
-    }
-    if (v instanceof Integer days) {
-      return java.time.LocalDate.ofEpochDay(days).atStartOfDay();
     }
     return null;
   }

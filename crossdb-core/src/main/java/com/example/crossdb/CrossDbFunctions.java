@@ -120,6 +120,16 @@ public final class CrossDbFunctions {
     return joinWs(sep, a, b, c);
   }
 
+  /** CONCAT_WS(sep, a, b, c, d)（4 参调用形态）。 */
+  public static String concatWs4(String sep, Object a, Object b, Object c) {
+    return joinWs(sep, a, b, c);
+  }
+
+  /** CONCAT_WS(sep, a, b, c, d)（5 参调用形态）。 */
+  public static String concatWs5(String sep, Object a, Object b, Object c, Object d) {
+    return joinWs(sep, a, b, c, d);
+  }
+
   private static String joinWs(String sep, Object... parts) {
     if (sep == null) {
       return null;
@@ -463,6 +473,361 @@ public final class CrossDbFunctions {
 
   private static boolean isMonthEnd(java.time.LocalDate d) {
     return d.getDayOfMonth() == d.lengthOfMonth();
+  }
+
+  /** INSTR(str, substr)（MySQL/Oracle）：substr 在 str 中首次出现位置（1 基），
+   * 未找到 0；任一 NULL 得 NULL。与 LOCATE 参数顺序相反。 */
+  public static Long instr2(String str, String substr) {
+    if (str == null || substr == null) {
+      return null;
+    }
+    return (long) str.indexOf(substr) + 1;
+  }
+
+  /** INSTR(str, substr, start)（Oracle）：自 start（1 基）起首次出现位置；
+   * start<1 或未找到得 0。 */
+  public static Long instr3(String str, String substr, BigDecimal start) {
+    if (str == null || substr == null || start == null) {
+      return null;
+    }
+    long s = start.longValue();
+    if (s < 1) {
+      return 0L;
+    }
+    return (long) str.indexOf(substr, (int) (s - 1)) + 1;
+  }
+
+  /** SUBSTRING_INDEX(s, delim, n)（MySQL）：n>0 取第 n 个 delim 之前的前缀；
+   * n<0 取倒数第 |n| 个 delim 之后的后缀；n=0 得空串；delim 空串得空串。 */
+  public static String substringIndex(String s, String delim, BigDecimal n) {
+    if (s == null || delim == null || n == null) {
+      return null;
+    }
+    if (delim.isEmpty() || n.signum() == 0) {
+      return "";
+    }
+    int count = n.intValue();
+    if (count > 0) {
+      int idx = -1;
+      for (int i = 0; i < count; i++) {
+        idx = s.indexOf(delim, idx + 1);
+        if (idx < 0) {
+          return s;
+        }
+      }
+      return s.substring(0, idx);
+    }
+    int idx = s.length();
+    for (int i = 0; i < -count; i++) {
+      idx = s.lastIndexOf(delim, idx - 1);
+      if (idx < 0) {
+        return s;
+      }
+    }
+    return s.substring(idx + delim.length());
+  }
+
+  /** REGEXP_REPLACE(s, pat, repl)（MySQL 3 参全局替换；默认 ci collation 语义：
+   * 匹配不区分大小写，替换全部出现）。 */
+  public static String regexpReplace3(String s, String pat, String repl) {
+    if (s == null || pat == null || repl == null) {
+      return null;
+    }
+    if (pat.isEmpty()) {
+      return s;
+    }
+    try {
+      return java.util.regex.Pattern.compile(pat,
+          java.util.regex.Pattern.CASE_INSENSITIVE | java.util.regex.Pattern.UNICODE_CASE)
+          .matcher(s).replaceAll(java.util.regex.Matcher.quoteReplacement(repl));
+    } catch (java.util.regex.PatternSyntaxException e) {
+      throw new IllegalArgumentException("REGEXP_REPLACE 模式非法: " + pat, e);
+    }
+  }
+
+  /** MySQL 逻辑 XOR（a XOR b）：任一 NULL 得 NULL；否则按 MySQL 真值规则
+   * （数值非 0 / 布尔）异或，返回 1/0。 */
+  public static Integer xor(Object a, Object b) {
+    if (a == null || b == null) {
+      return null;
+    }
+    return truthy(a) ^ truthy(b) ? 1 : 0;
+  }
+
+  private static boolean truthy(Object v) {
+    if (v instanceof Boolean b) {
+      return b;
+    }
+    if (v instanceof Number n) {
+      return n.doubleValue() != 0;
+    }
+    if (v instanceof String s) {
+      try {
+        return new BigDecimal(s.trim()).signum() != 0;
+      } catch (NumberFormatException e) {
+        return false;
+      }
+    }
+    throw new IllegalArgumentException("XOR 不支持操作数类型 " + v.getClass().getName());
+  }
+
+  /** TRY_CAST 目标类型的本地实现族：解析失败/溢出返回 NULL（DuckDB/SQL Server 语义）。
+   * 输入按字符串/数值承载统一转 BigDecimal 解析。 */
+  public static Integer tryInt(Object v) {
+    BigDecimal d = tryNumber(v);
+    try {
+      return d == null ? null : d.setScale(0, java.math.RoundingMode.DOWN).intValueExact();
+    } catch (ArithmeticException e) {
+      return null;
+    }
+  }
+
+  public static Long tryBigint(Object v) {
+    BigDecimal d = tryNumber(v);
+    try {
+      return d == null ? null : d.setScale(0, java.math.RoundingMode.DOWN).longValueExact();
+    } catch (ArithmeticException e) {
+      return null;
+    }
+  }
+
+  public static Double tryDouble(Object v) {
+    BigDecimal d = tryNumber(v);
+    return d == null ? null : d.doubleValue();
+  }
+
+  public static BigDecimal tryDecimal(Object v) {
+    return tryNumber(v);
+  }
+
+  private static BigDecimal tryNumber(Object v) {
+    if (v == null) {
+      return null;
+    }
+    try {
+      if (v instanceof BigDecimal d) {
+        return d;
+      }
+      if (v instanceof Number n) {
+        return new BigDecimal(n.toString());
+      }
+      if (v instanceof Boolean b) {
+        return b ? BigDecimal.ONE : BigDecimal.ZERO;
+      }
+      String s = v.toString().trim();
+      if (s.isEmpty()) {
+        return null;
+      }
+      return new BigDecimal(s);
+    } catch (NumberFormatException e) {
+      return null;
+    }
+  }
+
+  /** NEXT_DAY(date, dow)（Oracle）：严格晚于 date 的第一个星期 dow。
+   * dow 可为星期全名/缩写（大小写不敏感）或 1-7（1=星期日）。返回 DATE 承载。 */
+  public static java.sql.Date nextDay(Object date, Object dow) {
+    java.time.LocalDate d = toLocalDate(date);
+    if (d == null || dow == null) {
+      return null;
+    }
+    java.time.DayOfWeek target = parseDayOfWeek(dow);
+    if (target == null) {
+      throw new IllegalArgumentException("NEXT_DAY 无法识别星期: " + dow);
+    }
+    java.time.LocalDate next = d.plusDays(1);
+    while (next.getDayOfWeek() != target) {
+      next = next.plusDays(1);
+    }
+    return java.sql.Date.valueOf(next);
+  }
+
+  private static java.time.DayOfWeek parseDayOfWeek(Object dow) {
+    if (dow instanceof Number n) {
+      int v = n.intValue();
+      // Oracle：1=星期日 … 7=星期六 → ISO DayOfWeek（1=星期一 … 7=星期日）
+      return switch (v) {
+        case 1 -> java.time.DayOfWeek.SUNDAY;
+        case 2 -> java.time.DayOfWeek.MONDAY;
+        case 3 -> java.time.DayOfWeek.TUESDAY;
+        case 4 -> java.time.DayOfWeek.WEDNESDAY;
+        case 5 -> java.time.DayOfWeek.THURSDAY;
+        case 6 -> java.time.DayOfWeek.FRIDAY;
+        case 7 -> java.time.DayOfWeek.SATURDAY;
+        default -> null;
+      };
+    }
+    String s = dow.toString().trim().toUpperCase();
+    if (s.length() < 3) {
+      return null;
+    }
+    for (java.time.DayOfWeek w : java.time.DayOfWeek.values()) {
+      String full = w.name();
+      // 全名前缀或 ≥3 字符缩写前缀（MON/MONDAY 等）
+      if (full.startsWith(s) || full.startsWith(s.substring(0, 3))) {
+        return w;
+      }
+    }
+    return null;
+  }
+
+  /** TO_CHAR(date[, fmt])（Oracle）：单参形态 CAST 为 VARCHAR（时间列按 ISO
+   * yyyy-MM-dd；真数值列字符串化）；双参按 Oracle 格式模型渲染常用子集：
+   * YYYY/YY/MM/MON/MONTH/DD/DY/DAY/HH24/MI/SS 与字面文本，其余字符原样。
+   * 注意 Integer 按引擎约定为 DATE（epoch days）承载，不作数值解读。 */
+  public static String toChar(Object v, String fmt) {
+    if (v == null) {
+      return null;
+    }
+    if (v instanceof BigDecimal || v instanceof Double || v instanceof Float) {
+      return v.toString();
+    }
+    java.time.LocalDateTime dt = toWallDateTime(v);
+    if (dt == null) {
+      return v.toString();
+    }
+    if (fmt == null) {
+      return dt.toLocalDate().toString();
+    }
+    StringBuilder b = new StringBuilder();
+    String f = fmt.toUpperCase();
+    int i = 0;
+    while (i < f.length()) {
+      String rest = f.substring(i);
+      int take;
+      String out;
+      if (rest.startsWith("YYYY")) {
+        out = String.format("%04d", dt.getYear());
+        take = 4;
+      } else if (rest.startsWith("YY")) {
+        out = String.format("%02d", dt.getYear() % 100);
+        take = 2;
+      } else if (rest.startsWith("MONTH")) {
+        out = " " + dt.getMonth().name();
+        take = 5;
+      } else if (rest.startsWith("MON")) {
+        out = dt.getMonth().name().substring(0, 3);
+        take = 3;
+      } else if (rest.startsWith("MM")) {
+        out = String.format("%02d", dt.getMonthValue());
+        take = 2;
+      } else if (rest.startsWith("DAY")) {
+        out = " " + dt.getDayOfWeek().name();
+        take = 3;
+      } else if (rest.startsWith("DY")) {
+        out = dt.getDayOfWeek().name().substring(0, 3);
+        take = 2;
+      } else if (rest.startsWith("DD")) {
+        out = String.format("%02d", dt.getDayOfMonth());
+        take = 2;
+      } else if (rest.startsWith("HH24")) {
+        out = String.format("%02d", dt.getHour());
+        take = 4;
+      } else if (rest.startsWith("MI")) {
+        out = String.format("%02d", dt.getMinute());
+        take = 2;
+      } else if (rest.startsWith("SS")) {
+        out = String.format("%02d", dt.getSecond());
+        take = 2;
+      } else {
+        out = String.valueOf(fmt.charAt(i));
+        take = 1;
+      }
+      b.append(out);
+      i += take;
+    }
+    return b.toString();
+  }
+
+  /** 统一时间承载 → UTC 墙钟 LocalDateTime（Integer=epoch days，Number=epoch millis）。 */
+  private static java.time.LocalDateTime toWallDateTime(Object v) {
+    if (v instanceof Integer days) {
+      return java.time.LocalDate.ofEpochDay(days).atStartOfDay();
+    }
+    if (v instanceof Number millis) {
+      return java.time.Instant.ofEpochMilli(millis.longValue())
+          .atZone(java.time.ZoneOffset.UTC).toLocalDateTime();
+    }
+    if (v instanceof Timestamp t) {
+      return java.time.Instant.ofEpochMilli(t.getTime())
+          .atZone(java.time.ZoneOffset.UTC).toLocalDateTime();
+    }
+    if (v instanceof LocalDateTime dt) {
+      return dt;
+    }
+    if (v instanceof java.util.Date d) {
+      return java.time.Instant.ofEpochMilli(d.getTime())
+          .atZone(java.time.ZoneOffset.UTC).toLocalDateTime();
+    }
+    return null;
+  }
+
+  /** DATE_FORMAT(ts, fmt)（MySQL）：按 MySQL 格式符渲染（时间按 UTC 墙钟解释，
+   * 与引擎承载约定一致）。支持常用子集：%Y %y %m %c %d %e %H %k %h %i %s %S
+   * %T %p %M %b %j %W %a %D %f %%；其他 %x 原样保留。 */
+  public static String dateFormat(Object v, String fmt) {
+    if (v == null || fmt == null) {
+      return null;
+    }
+    java.time.LocalDateTime dt = toWallDateTime(v);
+    if (dt == null) {
+      throw new IllegalArgumentException("DATE_FORMAT 不支持入参类型 " + v.getClass().getName());
+    }
+    StringBuilder b = new StringBuilder();
+    int n = fmt.length();
+    for (int i = 0; i < n; i++) {
+      char c = fmt.charAt(i);
+      if (c != '%' || i + 1 >= n) {
+        b.append(c);
+        continue;
+      }
+      char s = fmt.charAt(++i);
+      switch (s) {
+        case 'Y' -> b.append(String.format("%04d", dt.getYear()));
+        case 'y' -> b.append(String.format("%02d", dt.getYear() % 100));
+        case 'm' -> b.append(String.format("%02d", dt.getMonthValue()));
+        case 'c' -> b.append(dt.getMonthValue());
+        case 'd' -> b.append(String.format("%02d", dt.getDayOfMonth()));
+        case 'e' -> b.append(dt.getDayOfMonth());
+        case 'H', 'k' -> b.append(String.format(s == 'H' ? "%02d" : "%d", dt.getHour()));
+        case 'h', 'l' -> {
+          int h12 = dt.getHour() % 12;
+          if (h12 == 0) {
+            h12 = 12;
+          }
+          b.append(String.format(s == 'h' ? "%02d" : "%d", h12));
+        }
+        case 'i' -> b.append(String.format("%02d", dt.getMinute()));
+        case 's', 'S' -> b.append(String.format("%02d", dt.getSecond()));
+        case 'f' -> b.append(String.format("%06d", dt.getNano() / 1_000));
+        case 'T' -> b.append(String.format("%02d:%02d:%02d",
+            dt.getHour(), dt.getMinute(), dt.getSecond()));
+        case 'p' -> b.append(dt.getHour() < 12 ? "AM" : "PM");
+        case 'M' -> b.append(titleCase(dt.getMonth().name()));
+        case 'b' -> b.append(titleCase(dt.getMonth().name().substring(0, 3)));
+        case 'W' -> b.append(titleCase(dt.getDayOfWeek().name()));
+        case 'a' -> b.append(titleCase(dt.getDayOfWeek().name().substring(0, 3)));
+        case 'j' -> b.append(String.format("%03d", dt.getDayOfYear()));
+        case 'D' -> b.append(dt.getDayOfMonth()).append(daySuffix(dt.getDayOfMonth()));
+        case '%' -> b.append('%');
+        default -> b.append('%').append(s);
+      }
+    }
+    return b.toString();
+  }
+
+  /** MySQL 渲染约定：月/星期名标题式（January / Jan / Monday / Mon）。 */
+  private static String titleCase(String upperName) {
+    return upperName.charAt(0) + upperName.substring(1).toLowerCase(java.util.Locale.ROOT);
+  }
+
+  private static String daySuffix(int day) {
+    return switch (day % 10) {
+      case 1 -> day / 10 == 1 ? "th" : "st";
+      case 2 -> day / 10 == 1 ? "th" : "nd";
+      case 3 -> day / 10 == 1 ? "th" : "rd";
+      default -> "th";
+    };
   }
 
   /** TIMESTAMPDIFF(unit, a, b)：完整单位数差值（MySQL 语义），实现见

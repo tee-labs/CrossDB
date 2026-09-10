@@ -11,8 +11,10 @@ final class Fixtures {
   static final JdbcDataSource USERS = init("users", """
       CREATE TABLE IF NOT EXISTS users(id INT PRIMARY KEY, name VARCHAR(50));
       CREATE TABLE IF NOT EXISTS small(id INT PRIMARY KEY);
+      CREATE TABLE IF NOT EXISTS emps(id INT PRIMARY KEY, mgr_id INT, name VARCHAR(50));
       INSERT INTO users VALUES (1,'alice'),(2,'bob'),(3,'carol');
       INSERT INTO small VALUES (1),(2);
+      INSERT INTO emps VALUES (1,NULL,'ceo'),(2,1,'ann'),(3,1,'ben'),(4,2,'cid');
       """);
   static final JdbcDataSource ORDERS = init("orders", """
       CREATE TABLE IF NOT EXISTS orders(id INT PRIMARY KEY, user_id INT, amount INT);

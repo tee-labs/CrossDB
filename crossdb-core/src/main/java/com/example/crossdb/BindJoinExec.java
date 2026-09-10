@@ -47,7 +47,7 @@ public final class BindJoinExec {
   public static Enumerable<Object[]> join(Enumerable<Object[]> left, DataSource dataSource,
       String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, int width,
       int batchSize, int parallelism, boolean outer, boolean tupleIn) {
-    return join(left, dataSource, sqlPrefix, keyCols, leftKeys, rightKeys, width,
+    return join(left, dataSource, sqlPrefix, keyCols, leftKeys, rightKeys, null, width,
         batchSize, parallelism, outer, tupleIn, false, false, false, 0, false, false);
   }
 
@@ -56,12 +56,22 @@ public final class BindJoinExec {
       String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, int width,
       int batchSize, int parallelism, boolean outer, boolean tupleIn, boolean sortedByKey,
       boolean innerFirst, boolean full, int leftWidth) {
-    return join(left, dataSource, sqlPrefix, keyCols, leftKeys, rightKeys, width,
+    return join(left, dataSource, sqlPrefix, keyCols, leftKeys, rightKeys, null, width,
         batchSize, parallelism, outer, tupleIn, sortedByKey, innerFirst, full, leftWidth,
         false, false);
   }
 
-  /** 跨库 join 执行入口（由生成代码与单测直接调用）。
+  /** 兼容旧签名：无 key 类型承载转换。 */
+  public static Enumerable<Object[]> join(Enumerable<Object[]> left, DataSource dataSource,
+      String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, int width,
+      int batchSize, int parallelism, boolean outer, boolean tupleIn, boolean sortedByKey,
+      boolean innerFirst, boolean full, int leftWidth, boolean semi, boolean anti) {
+    return join(left, dataSource, sqlPrefix, keyCols, leftKeys, rightKeys, null, width,
+        batchSize, parallelism, outer, tupleIn, sortedByKey, innerFirst, full, leftWidth,
+        semi, anti);
+  }
+
+  /** Cross-database join execution entry point (called directly by generated code and unit tests).
    *
    * @param left      外表（驱动侧）Enumerable
    * @param dataSource 内表所在库
@@ -69,6 +79,8 @@ public final class BindJoinExec {
    * @param keyCols    内表 join key 的带引号列引用（如 "T"."USER_ID"），长度 = key 数
    * @param leftKeys   外表行的 key 列下标
    * @param rightKeys  内表行（SELECT * 结果）的 key 列下标
+   * @param colTypes   内表全部列的 SqlTypeName 名（DATE/TIMESTAMP 列做承载转换；
+   *                   null = 全部按原值透传）
    * @param width      内表行宽度
    * @param batchSize  每批 distinct key 数上限（同时是窗口行数上限）
    * @param parallelism 并发批次数
@@ -82,9 +94,10 @@ public final class BindJoinExec {
    * @param anti       true=ANTI（无匹配才输出；须与 semi 同设）
    */
   public static Enumerable<Object[]> join(Enumerable<Object[]> left, DataSource dataSource,
-      String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, int width,
-      int batchSize, int parallelism, boolean outer, boolean tupleIn, boolean sortedByKey,
-      boolean innerFirst, boolean full, int leftWidth, boolean semi, boolean anti) {
+      String sqlPrefix, String[] keyCols, int[] leftKeys, int[] rightKeys, String[] colTypes,
+      int width, int batchSize, int parallelism, boolean outer, boolean tupleIn,
+      boolean sortedByKey, boolean innerFirst, boolean full, int leftWidth, boolean semi,
+      boolean anti) {
     Stats stats = Stats.ACTIVE;
     return new AbstractEnumerable<>() {
       @Override public Enumerator<Object[]> enumerator() {
@@ -266,7 +279,7 @@ public final class BindJoinExec {
                   pool = Executors.newVirtualThreadPerTaskExecutor();
                 }
                 f = pool.submit(() -> fetchBatch(dataSource, sqlPrefix, keyCols, tupleIn,
-                    new ArrayList<>(windowKeys), rightKeys, width));
+                    new ArrayList<>(windowKeys), rightKeys, colTypes, width));
               }
               inflight.add(new Pending(window, new ArrayList<>(windowKeys), f));
             }
@@ -306,7 +319,7 @@ public final class BindJoinExec {
             }
             try {
               return fetchRemainderRows(dataSource, sqlPrefix, keyCols, tupleIn,
-                  new ArrayList<>(queued), width, batchSize).iterator();
+                  new ArrayList<>(queued), colTypes, rightKeys, width, batchSize).iterator();
             } catch (RuntimeException e) {
               shutdown();
               throw e;
@@ -319,7 +332,9 @@ public final class BindJoinExec {
           List<Object> keyOf(Object[] row) {
             Object[] vals = new Object[leftKeys.length];
             for (int i = 0; i < leftKeys.length; i++) {
-              vals[i] = row[leftKeys[i]];
+              // 外表 key 同样归一到引擎承载（Integer/Long），与内表回读 key 可比；
+              // 兼容外表枚举携带 java.sql.Date/Timestamp 的形态
+              vals[i] = readValue(row[leftKeys[i]], typeOf(colTypes, rightKeys[i]));
             }
             List<Object> key = Arrays.asList(vals);
             return key.contains(null) ? null : key;
@@ -359,7 +374,7 @@ public final class BindJoinExec {
 
   private static Map<List<Object>, List<Object[]>> fetchBatch(DataSource dataSource,
       String sqlPrefix, String[] keyCols, boolean tupleIn, List<List<Object>> keys,
-      int[] rightKeys, int width) throws Exception {
+      int[] rightKeys, String[] colTypes, int width) throws Exception {
     StringBuilder sql = new StringBuilder(sqlPrefix).append(" WHERE ")
         .append(buildWhere(keyCols, keys.size(), tupleIn));
     Map<List<Object>, List<Object[]>> result = new HashMap<>();
@@ -367,25 +382,81 @@ public final class BindJoinExec {
         PreparedStatement st = c.prepareStatement(sql.toString())) {
       int p = 0;
       for (List<Object> key : keys) {
-        for (Object v : key) {
-          st.setObject(++p, v);
+        for (int i = 0; i < key.size(); i++) {
+          st.setObject(++p, bindValue(key.get(i), typeOf(colTypes, rightKeys[i])));
         }
       }
       try (ResultSet rs = st.executeQuery()) {
         while (rs.next()) {
           Object[] row = new Object[width];
           for (int i = 0; i < width; i++) {
-            row[i] = rs.getObject(i + 1);
+            row[i] = readValue(rs.getObject(i + 1), typeOf(colTypes, i));
           }
           Object[] kvals = new Object[rightKeys.length];
           for (int i = 0; i < rightKeys.length; i++) {
-            kvals[i] = rs.getObject(rightKeys[i] + 1);
+            kvals[i] = row[rightKeys[i]]; // 已按列类型归一
           }
           result.computeIfAbsent(Arrays.asList(kvals), k -> new ArrayList<>()).add(row);
         }
       }
     }
     return result;
+  }
+
+  /** 列下标 i 的类型名（colTypes 为 null 时恒 null = 不转换）。 */
+  private static String typeOf(String[] colTypes, int i) {
+    return colTypes == null ? null : colTypes[i];
+  }
+
+  /** 绑参方向承载转换：引擎侧 DATE=epoch days Integer / TIMESTAMP=epoch millis Long，
+   * 源库列需要 java.sql 类型才能正确比较。 */
+  static Object bindValue(Object v, String type) {
+    if (v == null || type == null) {
+      return v;
+    }
+    switch (type) {
+      case "DATE":
+        if (v instanceof Integer days) {
+          return java.sql.Date.valueOf(java.time.LocalDate.ofEpochDay(days));
+        }
+        return v;
+      case "TIMESTAMP":
+        if (v instanceof Long millis) {
+          return new java.sql.Timestamp(millis);
+        }
+        return v;
+      default:
+        return v;
+    }
+  }
+
+  /** 回读方向承载转换：源库 java.sql 值归一为引擎承载（DATE→epoch days Integer、
+   * TIMESTAMP→epoch millis Long）——Bind Join 直读 ResultSet 绕过了 Calcite 转换器的
+   * 表示归一，下游表达式按引擎承载取值。 */
+  static Object readValue(Object v, String type) {
+    if (v == null || type == null) {
+      return v;
+    }
+    switch (type) {
+      case "DATE":
+        if (v instanceof java.sql.Date d) {
+          return (int) d.toLocalDate().toEpochDay();
+        }
+        if (v instanceof java.time.LocalDate d) {
+          return (int) d.toEpochDay();
+        }
+        return v;
+      case "TIMESTAMP":
+        if (v instanceof java.sql.Timestamp t) {
+          return t.getTime();
+        }
+        if (v instanceof java.util.Date d) {
+          return d.getTime();
+        }
+        return v;
+      default:
+        return v;
+    }
   }
 
   /** 按字典序比较 key（Comparable 元素；不可比较时抛 CCE，由调用方降级）。 */
@@ -406,7 +477,8 @@ public final class BindJoinExec {
    * FULL JOIN 语义要求左侧补 NULL 输出）。外表无非空 key 时内表全量即为未匹配（无
    * WHERE；safeMode 下由调用方拒绝）。行数受 rowLimit 熔断封顶（语句级 maxRows）。 */
   private static List<Object[]> fetchRemainderRows(DataSource dataSource, String sqlPrefix,
-      String[] keyCols, boolean tupleIn, List<List<Object>> keys, int width, int chunk)
+      String[] keyCols, boolean tupleIn, List<List<Object>> keys, String[] colTypes,
+      int[] rightKeys, int width, int chunk)
       throws Exception {
     StringBuilder sql = new StringBuilder(sqlPrefix);
     if (!keys.isEmpty()) {
@@ -427,15 +499,15 @@ public final class BindJoinExec {
         PreparedStatement st = c.prepareStatement(sql.toString())) {
       int p = 0;
       for (List<Object> key : keys) {
-        for (Object v : key) {
-          st.setObject(++p, v);
+        for (int i = 0; i < key.size(); i++) {
+          st.setObject(++p, bindValue(key.get(i), typeOf(colTypes, rightKeys[i])));
         }
       }
       try (ResultSet rs = st.executeQuery()) {
         while (rs.next()) {
           Object[] row = new Object[width];
           for (int i = 0; i < width; i++) {
-            row[i] = rs.getObject(i + 1);
+            row[i] = readValue(rs.getObject(i + 1), typeOf(colTypes, i));
           }
           rows.add(row);
         }

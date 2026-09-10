@@ -17,7 +17,7 @@ virtual threads).
   - `MultiArgCountRule` — rewrites MySQL-style multi-arg `COUNT(a, b)` into portable `COUNT(CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN 1 END)` so it can push down
   - `CrossMatchRule` + `EnumerableCrossMatch` + `CrossMatchExec` — MATCH_RECOGNIZE subset: upstream `EnumerableMatch` cannot compile pattern quantifiers or symbol-referencing DEFINEs at runtime; the rule compiles a supported subset (PATTERN concat/quantifiers incl. greedy-reluctant, DEFINE symbol column refs incl. `LAST/PREV(x, 0)`, PARTITION BY, ORDER BY, ALL ROWS PER MATCH, AFTER SKIP PAST LAST ROW / TO NEXT ROW) into a local backtracking matcher. DEFINE predicates are rewritten to "expanded-row" input refs (current-row block + one block per referenced symbol) and compiled via `RexToLixTranslator`. `CrossMatchExec` must stay **public** (Calcite codegen resolves callee classes reflectively from generated code in the unnamed package — a package-private class yields Janino "no applicable method" on an identical signature). `SqlTreeRewrites` also injects the standard default `AFTER MATCH SKIP PAST LAST ROW` when absent (Calcite normalizes to SKIP TO NEXT ROW, deviating from SQL:2011/Oracle)
   - `ColumnHints` — column type catalog scanned once via JDBC `DatabaseMetaData` at first plan (invalidated on register); powers type-aware rewrites: DATE-column ± integer literal → `DATE ± INTERVAL 'n' DAY` (Oracle semantics), `CAST(boolean AS numeric)` → literal/CASE (MySQL tinyint), float-involved `MOD` → local `CROSSDB_MOD` (Java `%` semantics; integer MOD stays native for pushdown). Same-name columns across DBs merge to the wider numeric kind (int+float→float); cross-kind (date/bool) conflicts drop the name
-  - `SqlRewrites` is the **facade** (`preprocess()` / `rewrite()`) over the parse-stage (pre-validation) semantic-preserving rewrite family, split by stage: `SqlTextRewrites` (statement-level text rewrites; delegates bitwise/DIV token rewrites to `BitwiseDivRewrites`), `SqlTreeRewrites` (parse-tree expression rewrites + `FromRewriter` for USING expansion / alias column lists), `LocalOperators` (the local UDF/UDAF operator table both stages mount onto), and `SqlText` (shared live-mask lexical scanning). Behavior, for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` / `PERCENTILE_DISC` → local UDF/UDAF implementations, `DECODE` → `CASE WHEN … IS NOT DISTINCT FROM` (Oracle NULL=NULL equality), `IIF` → `CASE WHEN`, `ISNULL` → `COALESCE`, `ILIKE` → `LOWER(x) LIKE LOWER(p)`, `TRANSLATE` → local UDF (name clashes with the std `SqlTranslateFunction`), `ANY_VALUE`/`MODE`/`ARRAY_AGG` → local UDAFs (ARRAY_AGG renders `"[v1, v2, …]"`, value-ascending), `AGG(x) FILTER (WHERE …) OVER` → `AGG(CASE WHEN … THEN x END) OVER` (validator rejects FILTER+OVER; note pre-validation std aggregates are still unbound — `isAggregator()` is false, match by name), plus this batch: `LOG(x)`→`LN(x)`/`LOG(b,x)`→`LN(x)/LN(b)`, `SPACE(n)`→`REPEAT(' ',n)`, `CHAR(n)`→`CHR(n)`, `STRCMP`→3-branch CASE, `LEFT/RIGHT(s,n)`/`LOCATE(sub,str[,start])`/`NVL`→local UDF/COALESSE, `STRAIGHT_JOIN`→`JOIN` (statement-level hint stripped), token-level rewrites for bitwise `& | ^ ~ << >>` and `DIV` → CROSSDB_BIT*/IDIV calls (operand-chain scanner honoring MySQL/PG precedence; `||` concat and `&&` never matched), `FETCH FIRST n PERCENT ROWS` → ROW_NUMBER/COUNT window derived-table form, GROUPS frames → DENSE_RANK wrap + RANGE (flat single-relation SELECT, bare-column keys only), `FIRST_VALUE/LAST_VALUE … IGNORE NULLS OVER` → local non-null-end UDAFs, `COUNT(DISTINCT x) OVER` → local distinct-count window UDAF (upstream `EnumerableWindow` silently drops the DISTINCT qualifier), `LEFT SEMI/ANTI JOIN` → equivalent `CROSS APPLY (SELECT 1 … HAVING COUNT(*) …)`, `FETCH FIRST n ROWS WITH TIES` → first-n-distinct-keys `IN` semi-join (bare-column keys that also appear in the SELECT list), `REGEXP` → `RLIKE` → local `CROSSDB_REGEXP` (Java regex, case-sensitive), `BOOL_AND/BOOL_OR/EVERY` → local UDAFs, `LISTAGG … ON OVERFLOW ERROR` clause stripped (standard default), row-constructor `< <= > >=` expanded into lexicographic scalar comparisons, trailing statement semicolons stripped. Unsafe forms are left untouched for the validator
+  - `SqlRewrites` is the **facade** (`preprocess()` / `rewrite()`) over the parse-stage (pre-validation) semantic-preserving rewrite family, split by stage: `SqlTextRewrites` (statement-level text rewrites; delegates bitwise/DIV token rewrites to `BitwiseDivRewrites`), `SqlTreeRewrites` (parse-tree expression rewrites + `FromRewriter` for USING expansion / alias column lists), `LocalOperators` (the local UDF/UDAF operator table both stages mount onto), and `SqlText` (shared live-mask lexical scanning). Behavior, for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` / `PERCENTILE_DISC` → local UDF/UDAF implementations, `DECODE` → `CASE WHEN … IS NOT DISTINCT FROM` (Oracle NULL=NULL equality), `IIF` → `CASE WHEN`, `ISNULL` → `COALESCE`, `ILIKE` → `LOWER(x) LIKE LOWER(p)`, `TRANSLATE` → local UDF (name clashes with the std `SqlTranslateFunction`), `ANY_VALUE`/`MODE`/`ARRAY_AGG` → local UDAFs (ARRAY_AGG renders `"[v1, v2, …]"`, value-ascending), `AGG(x) FILTER (WHERE …) OVER` → `AGG(CASE WHEN … THEN x END) OVER` (validator rejects FILTER+OVER; note pre-validation std aggregates are still unbound — `isAggregator()` is false, match by name), plus this batch: `LOG(x)`→`LN(x)`/`LOG(b,x)`→`LN(x)/LN(b)`, `SPACE(n)`→`REPEAT(' ',n)`, `CHAR(n)`→`CHR(n)`, `STRCMP`→3-branch CASE, `LEFT/RIGHT(s,n)`/`LOCATE(sub,str[,start])`/`NVL`→local UDF/COALESSE, `STRAIGHT_JOIN`→`JOIN` (statement-level hint stripped), token-level rewrites for bitwise `& | ^ ~ << >>` and `DIV` → CROSSDB_BIT*/IDIV calls (operand-chain scanner honoring MySQL/PG precedence; `||` concat and `&&` never matched), `FETCH FIRST n PERCENT ROWS` → ROW_NUMBER/COUNT window derived-table form, GROUPS frames → DENSE_RANK wrap + RANGE (flat single-relation SELECT, bare-column keys only), `FIRST_VALUE/LAST_VALUE … IGNORE NULLS OVER` → local non-null-end UDAFs, `COUNT(DISTINCT x) OVER` → local distinct-count window UDAF (upstream `EnumerableWindow` silently drops the DISTINCT qualifier), `LEFT SEMI/ANTI JOIN` → equivalent `CROSS APPLY (SELECT 1 … HAVING COUNT(*) …)`, `FETCH FIRST n ROWS WITH TIES` → first-n-distinct-keys `IN` semi-join (bare-column keys that also appear in the SELECT list), `REGEXP` → `RLIKE` → local `CROSSDB_REGEXP` (Java regex, case-sensitive), `BOOL_AND/BOOL_OR/EVERY` → local UDAFs, `LISTAGG … ON OVERFLOW ERROR` clause stripped (standard default), row-constructor `< <= > >=` expanded into lexicographic scalar comparisons, trailing statement semicolons stripped. Latest batch: `INSTR(2/3-arg)`/`SUBSTRING_INDEX`/`DATE_FORMAT`/`REGEXP_REPLACE(3-arg)`/`TO_CHAR`/`NEXT_DAY`/`ARG_MIN/ARG_MAX` local implementations; `TRY_CAST(x AS numeric)` -> per-target CROSSDB_TRY_* UDFs (failed parse -> NULL), char targets degrade to CAST; `NVL2` -> CASE IS NOT NULL; `LENGTH` -> CHAR_LENGTH; `CONCAT_WS` 4/5-arity via CROSSDB_CONCAT_WS4/5; text-level `date_diff(u,a,b)` rename, MySQL logical `XOR` -> CROSSDB_XOR (boolean-operand chain scanner; NULL literal operands allowed), `GROUP BY ALL` -> explicit keys (select items without aggregates), `SELECT * EXCLUDE (cols)` -> catalog-expanded column list (ColumnHints table catalog), Oracle `(+)` comma-join -> LEFT JOIN (two-table, (+) confined to one deficient alias), `CONNECT BY [NOCYCLE] PRIOR a=b` (+START WITH/WHERE, either clause order) -> `WITH RECURSIVE` CTE (lvl<100 cycle guard), DuckDB `{k: e}.k` struct-dot constant folding, `LIST_CONTAINS([literals], v)` -> `v IN (...)`. Unsafe forms are left untouched for the validator; `SqlRewrites.preprocess(sql, hints)` is the hints-aware entry (EXCLUDE expansion needs the column catalog). Unsafe forms are left untouched for the validator
   - `CrossDbFunctions` — local scalar UDF implementations registered by `LocalOperators` (three-valued NULL logic): includes `CROSSDB_TRANSLATE`, `SOUNDEX`, `LTRIM`/`RTRIM`; keeps behavior identical regardless of which source DB evaluates what
   - `CrossDbAggregates` — local aggregate/window UDAF implementations (`CROSSDB_LISTAGG` distinct-listagg, `CROSSDB_MEDIAN`, `CROSSDB_PERCENTILE_CONT/DISC`, `CROSSDB_NTH_VALUE2/3/4` frame-aware nth-value, `CROSSDB_BOOL_AND/BOOL_OR` three-valued booleans, `CROSSDB_ARRAY_AGG`, `CROSSDB_ANY_VALUE`, `CROSSDB_MODE`, `CROSSDB_COUNT_DISTINCT`, `CROSSDB_FIRST/LAST_VALUE_NN`) + `TIMESTAMPDIFF` evaluation; wired in by `LocalOperators` (operator registration) + `SqlTreeRewrites` (call-site mounting). Note: UDAFs are registered with `requiresOrder=false` so they can serve order-less windows, and the Calcite UDAF pipeline pre-filters NULL inputs (empty/all-NULL groups yield NULL)
   - `EnumerableBindJoin` (Calcite physical rel) + `BindJoinExec` (streaming runtime; SEMI/ANTI both pass `semi=true`, ANTI additionally `anti=true`)
@@ -34,7 +34,7 @@ virtual threads).
 ## Commands
 
 ```bash
-mvn test                                                    # all JUnit 5 tests, both modules (922; 22 @Disabled("待支持: …") compatibility cases skip by design)
+mvn test                                                    # all JUnit 5 tests, both modules (1243; 11 @Disabled("待支持: …") compatibility cases skip by design)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 # run with -DargLine="-Duser.timezone=UTC" on a non-UTC machine: TIMESTAMP values
@@ -50,23 +50,67 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
   up new H2 instances.
 - `crossdb-core` must stay Spring-free; only the starter module touches Spring.
 - Features not yet supported are covered by tests marked `@Disabled("待支持: …")`
-  (currently 22, all dialect candidates in `CrossDbFederatedSuiteTest`: INSTR、
-  SUBSTRING_INDEX、XOR、DATE_FORMAT、TRY_CAST、REGEXP_REPLACE 三参、EXCLUDE、
-  GROUP BY ALL、ARG_MIN、STRUCT 点访问、date_diff 前置形态、LIST_CONTAINS、
-  TO_CHAR、(+) 外连接、CONNECT BY、NEXT_DAY、PATTERN 区间量词 {n,m}、PATTERN
-  或语法、AVG(派生 SUM) 融合、跨库 DATE 连接键承载) — they are the tracked fix
-  backlog. Keep the assertions at standard semantics; fix the engine and re-enable
-  rather than deleting or weakening them. Former backlogs fixed and re-enabled:
-  the 4-case set in `CrossDbCoverageTest`, the 5-case set in
-  `CrossDbComprehensiveTest`, the 17-case set in `CrossDbFullCoverageTest`, and
+  (currently 11: SUBSTRING FROM<1 裁剪语义、POSSTR、NTILE、LAG/LEAD、MINUS 关键字、
+  LEVEL 伪列、TOP n PERCENT、TOP n WITH TIES、GROUPING SETS、ROLLUP、CUBE) — they
+  are the tracked fix backlog. Keep the assertions at standard semantics; fix the
+  engine and re-enable rather than deleting or weakening them. Former backlogs
+  fixed and re-enabled: the 4-case set in `CrossDbCoverageTest`, the 5-case set
+  in `CrossDbComprehensiveTest`, the 17-case set in `CrossDbFullCoverageTest`,
   the 14-case set spanning `CrossDbFullCoverageTest`/`CrossDbComprehensiveTest`/
-  `CrossDbFullScenariosTest` (GROUPS 帧 DENSE_RANK 改写、MATCH_RECOGNIZE 自研
-  CrossMatch 算子、MOD 浮点、LOG、LOCATE、LEFT/RIGHT、SPACE/CHAR、STRCMP、
-  DATE±n、位运算、DIV、FETCH FIRST n PERCENT、STRAIGHT_JOIN、CAST(布尔 AS 数值)).
+  `CrossDbFullScenariosTest`, and the 22-case set in `CrossDbFederatedSuiteTest`
+  (INSTR、SUBSTRING_INDEX、XOR、DATE_FORMAT、TRY_CAST、REGEXP_REPLACE 三参、EXCLUDE、
+  GROUP BY ALL、ARG_MIN、STRUCT 点访问、date_diff 前置形态、LIST_CONTAINS、TO_CHAR、
+  (+) 外连接、CONNECT BY→递归 CTE、NEXT_DAY、NVL2、PATTERN 区间量词/或语法、
+  AVG(派生 SUM) 融合、跨库 DATE 连接键承载——伴随 FORCE_NULLABLE 拆箱 NPE、
+  toDateTime DATE 分支序、ColumnHints 系统表污染、Bind Join 全列承载转换、
+  限定列 DATE±n、PATTERN 内位运算误伤、原子扫描 CAST/TIMESTAMP 前缀等多项引擎修复).
+- The sixth batch of scenario tests (one-shot complement modeled on sibling
+  systems' public suites, ~321 cases) lives in `CrossDbExprMatrixTest`
+  (sqllogictest-style expression/3VL/string/numeric/bitwise/conditional/
+  datetime matrices), `CrossDbWindowDeepTest` (ranking/aggregate/navigation
+  windows, frames incl. GROUPS, WINDOW clause, QUALIFY), `CrossDbJoinMatrixTest`
+  (cross-DB join key-type matrix incl. DATE/TIMESTAMP/BOOLEAN keys, composite
+  keys, outer/semi/anti families, multi-way, correlated/LATERAL, pushdown
+  shape assertions), `CrossDbSetOpsPagingTest` (UNION/INTERSECT/EXCEPT ×
+  DISTINCT/ALL, precedence, LIMIT/OFFSET/FETCH/WITH TIES/PERCENT, DISTINCT),
+  `CrossDbOracleMssqlDeepTest` (DECODE/NVL/NVL2/IIF/ISNULL, Oracle date
+  functions, CONNECT BY variants, (+) outer joins, TOP forms), and
+  `CrossDbAggModernHardeningTest` (aggregate deep matrix incl. LISTAGG/
+  PERCENTILE/ARG_MIN/MODE/FILTER, nested aggregates, modern SQL — QUALIFY/
+  EXCLUDE/TRY_CAST/STRUCT/LIST_CONTAINS/XOR/date_diff — plus safeMode/
+  rowLimit/read-only/metadata hardening). When adding new rewrites or engine
+  behavior, extend these classes rather than spawning new fixture H2s.
 
 
 ## Gotchas
 
+- Numeric/boolean-returning local UDFs must use `SqlTypeTransforms.FORCE_NULLABLE`
+  (see `LocalOperators.forced`): `TO_NULLABLE` only nulls the type when some
+  operand is nullable, so literal-argument calls derive NOT NULL and the
+  generated code unboxes the UDF result unconditionally (`Integer.intValue()`)
+  — null-returns (MOD by 0, TRY_CAST failures…) then NPE.
+- `CrossDbAggregates.toDateTime` must test `Integer` (DATE epoch-days carrier)
+  BEFORE the `Number` (TIMESTAMP epoch-millis) branch, or DATE arguments get
+  misread as milliseconds.
+- `ColumnHints.scanSources` filters system schemas (information_schema/pg_*)
+  and keys the table→columns catalog by registered-schema name; `SELECT *
+  EXCLUDE` expansion depends on it. Same-named columns across DBs still merge by
+  bare name for the category hints.
+- Bind Join reads the inner ResultSet directly, bypassing Calcite's
+  representation normalization — `EnumerableBindJoin.colTypes` (all inner
+  columns' SqlTypeNames) drives `BindJoinExec.readValue/bindValue` (DATE↔epoch
+  days, TIMESTAMP↔epoch millis) for rows, keys and parameters; outer keys are
+  normalized with the paired `rightKeys` type.
+- `CrossDb.plan()` runs `fixNestedJdbcAggregates` after planning: JdbcAggregate
+  over JdbcAggregate would be rendered by JdbcImplementor as one nested-agg SQL
+  (`SUM(SUM(x))`) that H2 rejects (upstream JDBC-adapter flaw); the fix
+  re-parents the outer aggregate chain onto local Enumerable. A logical-layer
+  barrier does NOT survive — optimizer rules remove pure-identity rels.
+- `BitwiseDivRewrites` must not touch `MATCH_RECOGNIZE ... PATTERN (...)` spans
+  (`|` is alternation there), and its atom scanners treat `CAST(`/`TIMESTAMP(`
+  style prefixes as function-call atoms (`FUNC_PREFIXES` exception to
+  `EXPR_KEYWORDS`); `<<`/`>>` operands are arithmetic chains (MySQL/PG
+  precedence: shifts bind looser than `+ -`).
 - `CrossDb.plan()` appends a rename/trim projection whenever the optimized rel's
   field names drift from the validated row type — JDBC pushdown absorbs projection
   aliases into source scans (labels fall back to catalog column names) and

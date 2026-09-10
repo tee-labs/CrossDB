@@ -56,6 +56,11 @@ final class SqlRewrites {
     return SqlTextRewrites.preprocess(sql);
   }
 
+  /** 文本预处理（带列类型目录：SELECT * EXCLUDE 列展开等需要表列清单的改写）。 */
+  static String preprocess(String sql, ColumnHints hints) {
+    return SqlTextRewrites.preprocess(sql, hints);
+  }
+
   static SqlNode rewrite(SqlNode parsed, SchemaPlus root, JavaTypeFactory typeFactory,
       ColumnHints hints) {
     return SqlTreeRewrites.rewrite(parsed, root, typeFactory, hints);

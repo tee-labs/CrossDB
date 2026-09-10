@@ -240,10 +240,17 @@ class BindJoinRule extends RelOptRule {
         .mapToObj(i -> t + "." + convention.dialect.quoteIdentifier(rightNames.get(i)))
         .toArray(String[]::new);
     boolean tupleIn = TUPLE_IN_DIALECTS.contains(convention.dialect.getDatabaseProduct());
+    // 内表全部列的 SqlTypeName：DATE/TIMESTAMP 列的承载转换（外表 epoch 承载 ↔
+    // 源库 java.sql 类型；Bind Join 直读 ResultSet 绕过了 JdbcToEnumerableConverter
+    // 的表示归一，须在此补齐），见 BindJoinExec.bindValue/readValue
+    final RelNode rightForTypes = rightEnum;
+    String[] colTypes = rightForTypes.getRowType().getFieldList().stream()
+        .map(f2 -> f2.getType().getSqlTypeName().name())
+        .toArray(String[]::new);
 
     return EnumerableBindJoin.create(leftEnum, rightEnum, condition, schemaOf(rightScan),
-        sqlPrefix, keyCols, leftKeys, rightKeys, rightNames.size(), batchSize, parallelism,
-        tupleIn, driverSortedByKey(leftEnum, leftKeys), joinType);
+        sqlPrefix, keyCols, leftKeys, rightKeys, colTypes, rightNames.size(), batchSize,
+        parallelism, tupleIn, driverSortedByKey(leftEnum, leftKeys), joinType);
   }
 
   /** 驱动侧是否按 join key 有序（collation 前缀恰为 leftKeys）——此时 Bind Join 可做

@@ -115,6 +115,80 @@ final class SqlTreeRewrites {
                   ops, call.getParserPosition())
               : call;
         }
+        if (upper.equals("NVL2") && call.getOperandList().size() == 3) {
+          // NVL2(e, a, b)（Oracle）→ CASE WHEN e IS NOT NULL THEN a ELSE b END
+          List<SqlNode> ops = call.getOperandList();
+          SqlParserPos pos = call.getParserPosition();
+          SqlNodeList whens = new SqlNodeList(pos);
+          whens.add(new SqlBasicCall(SqlStdOperatorTable.IS_NOT_NULL,
+              List.of(ops.get(0)), pos));
+          SqlNodeList thens = new SqlNodeList(pos);
+          thens.add(ops.get(1));
+          return new SqlCase(pos, null, whens, thens, ops.get(2));
+        }
+        if (upper.equals("INSTR")
+            && (call.getOperandList().size() == 2 || call.getOperandList().size() == 3)) {
+          // INSTR(str, substr[, start])（MySQL/Oracle）→ 本地 UDF（参数序与 LOCATE 相反）
+          return new SqlBasicCall(
+              call.getOperandList().size() == 2 ? INSTR2_FN : INSTR3_FN,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("LENGTH") && call.getOperandList().size() == 1) {
+          // LENGTH（MySQL/PG 常用名，Calcite 仅注册 CHAR_LENGTH）→ CHAR_LENGTH
+          return new SqlBasicCall(SqlStdOperatorTable.CHAR_LENGTH,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("CONCAT_WS") && call.getOperandList().size() >= 4
+            && call.getOperandList().size() <= 5) {
+          // CONCAT_WS 可变参：已注册元数仅 2/3，4/5 参按元数挂本地实现
+          return new SqlBasicCall(
+              call.getOperandList().size() == 4 ? CONCAT_WS4_FN : CONCAT_WS5_FN,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("SUBSTRING_INDEX") && call.getOperandList().size() == 3) {
+          return new SqlBasicCall(SUBSTRING_INDEX_FN, call.getOperandList(),
+              call.getParserPosition());
+        }
+        if (upper.equals("DATE_FORMAT") && call.getOperandList().size() == 2) {
+          return new SqlBasicCall(DATE_FORMAT_FN, call.getOperandList(),
+              call.getParserPosition());
+        }
+        if (upper.equals("REGEXP_REPLACE") && call.getOperandList().size() == 3) {
+          // MySQL 三参全局替换形态（Calcite 未注册）→ 本地 UDF；其余元数保留原样
+          return new SqlBasicCall(REGEXP_REPLACE3_FN, call.getOperandList(),
+              call.getParserPosition());
+        }
+        if (upper.equals("TO_CHAR")) {
+          List<SqlNode> ops = call.getOperandList();
+          SqlParserPos pos = call.getParserPosition();
+          if (ops.size() == 1) {
+            // TO_CHAR(x) 单参（Oracle 隐式格式）→ CAST AS VARCHAR
+            return new SqlBasicCall(SqlStdOperatorTable.CAST, List.of(ops.get(0),
+                new SqlDataTypeSpec(
+                    new SqlBasicTypeNameSpec(SqlTypeName.VARCHAR, pos), pos)), pos);
+          }
+          if (ops.size() == 2) {
+            return new SqlBasicCall(TO_CHAR2_FN, ops, pos);
+          }
+          return call;
+        }
+        if (upper.equals("NEXT_DAY") && call.getOperandList().size() == 2) {
+          return new SqlBasicCall(NEXT_DAY_FN, call.getOperandList(),
+              call.getParserPosition());
+        }
+        if ((upper.equals("ARG_MIN") || upper.equals("ARG_MAX"))
+            && call.getOperandList().size() == 2) {
+          // ARG_MIN/ARG_MAX(v, o)（DuckDB/Trino）→ 本地 UDAF（标准表 1.42 起有
+          // SqlBasicAggFunction 注册，但 Enumerable 无实现，统一挂本地）
+          return new SqlBasicCall(upper.equals("ARG_MIN") ? ARG_MIN_FN : ARG_MAX_FN,
+              call.getOperandList(), call.getParserPosition());
+        }
+        if (call.getKind() == SqlKind.SAFE_CAST) {
+          // TRY_CAST(x AS type)（解析器按 SAFE_CAST kind 产出）：校验器对字符→数值
+          // 目标类型检查过严且 Enumerable 无安全转换实现 → 按目标类型挂本地 UDF
+          // （失败得 NULL）；字符目标退化为恒成功的 CAST
+          return rewriteTryCast(call);
+        }
         if (upper.equals("ARRAY_AGG")) {
           return rewriteArrayAgg(call);
         }
@@ -241,6 +315,32 @@ final class SqlTreeRewrites {
     };
   }
 
+  /** TRY_CAST(x AS T)（SAFE_CAST kind）→ 按目标类型挂本地安全转换 UDF：
+   * 数值目标族（失败/溢出得 NULL）；VARCHAR/CHAR 目标 CAST 恒成功退化为 CAST；
+   * 其余目标（日期等）保留原样交校验器报错（待支持）。 */
+  private static SqlNode rewriteTryCast(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2 || !(ops.get(1) instanceof SqlDataTypeSpec spec)
+        || !(spec.getTypeNameSpec() instanceof SqlBasicTypeNameSpec basic)) {
+      return call;
+    }
+    SqlTypeName target = SqlTypeName.get(basic.getTypeName().getSimple());
+    SqlUserDefinedFunction fn = switch (target) {
+      case TINYINT, SMALLINT, INTEGER -> TRY_INT_FN;
+      case BIGINT -> TRY_BIGINT_FN;
+      case FLOAT, REAL, DOUBLE -> TRY_DOUBLE_FN;
+      case DECIMAL -> TRY_DECIMAL_FN;
+      default -> null;
+    };
+    if (fn != null) {
+      return new SqlBasicCall(fn, List.of(ops.get(0)), call.getParserPosition());
+    }
+    if (target == SqlTypeName.VARCHAR || target == SqlTypeName.CHAR) {
+      return new SqlBasicCall(SqlStdOperatorTable.CAST, ops, call.getParserPosition());
+    }
+    return call;
+  }
+
   /** LOG(x)（PostgreSQL/MySQL 单参 = 自然对数，Calcite 仅注册 LN）→ LN(x)；
    * LOG(b, x)（对数底 b）→ LN(x) / LN(b)。其余元数保留原样交校验器报错。 */
   private static SqlNode rewriteLog(SqlCall call) {
@@ -306,8 +406,8 @@ final class SqlTreeRewrites {
       return SqlLiteral.createExactNumeric(
           Boolean.TRUE.equals(lit.getValue()) ? "1" : "0", pos);
     }
-    if (operand instanceof SqlIdentifier id && id.isSimple()
-        && hints.isBooleanColumn(id.getSimple())) {
+    if (operand instanceof SqlIdentifier id && !id.names.isEmpty()
+        && hints.isBooleanColumn(id.names.get(id.names.size() - 1))) {
       SqlNodeList whens = new SqlNodeList(pos);
       whens.add(operand);
       whens.add(new SqlBasicCall(SqlStdOperatorTable.NOT, List.of(operand), pos));
@@ -354,9 +454,13 @@ final class SqlTreeRewrites {
         List.of(date, interval), pos);
   }
 
+  /** DATE/TIMESTAMP 列判定（可带限定符：p.made 按裸列名查目录——限定符不影响
+   * 类型归属，目录侧同名异类列已被剔除）。 */
   private static boolean isDateColumn(SqlNode node, ColumnHints hints) {
-    return node instanceof SqlIdentifier id && id.isSimple()
-        && hints.isDateColumn(id.getSimple());
+    if (!(node instanceof SqlIdentifier id) || id.names.isEmpty()) {
+      return false;
+    }
+    return hints.isDateColumn(id.names.get(id.names.size() - 1));
   }
 
   /** 整数字面量（含一元负号形态）→ Long；非整数字面量返回 null。 */
@@ -382,8 +486,8 @@ final class SqlTreeRewrites {
    * 浮点列（裸列名）。整数 MOD 不改写，保持原生下推路径。 */
   private static boolean modFloatInvolved(SqlCall mod, ColumnHints hints) {
     for (SqlNode op : mod.getOperandList()) {
-      if (isFloatLiteral(op) || (op instanceof SqlIdentifier id && id.isSimple()
-          && hints.isFloatColumn(id.getSimple()))) {
+      if (isFloatLiteral(op) || (op instanceof SqlIdentifier id && !id.names.isEmpty()
+          && hints.isFloatColumn(id.names.get(id.names.size() - 1)))) {
         return true;
       }
     }

@@ -1,5 +1,8 @@
 package com.example.crossdb;
 
+import java.util.ArrayList;
+import java.util.List;
+
 import static com.example.crossdb.SqlText.*;
 
 /** 位运算 / DIV 操作符的 token 级文本改写（MySQL / PostgreSQL 方言）。 */
@@ -8,6 +11,10 @@ final class BitwiseDivRewrites {
 
   /** 表达式边界关键字：作为操作数原子扫描的硬边界出现（出现在操作数位置即判定
    * 无法安全改写，跳过该处改写交由解析器报真实错误）。 */
+  /** 后随 '(' 时按函数调用原子处理的类型/转换前缀（EXPR_KEYWORDS 的例外）。 */
+  private static final java.util.Set<String> FUNC_PREFIXES = java.util.Set.of(
+      "CAST", "DATE", "TIMESTAMP", "TIME", "INTERVAL");
+
   private static final java.util.Set<String> EXPR_KEYWORDS = java.util.Set.of(
       "SELECT", "FROM", "WHERE", "GROUP", "HAVING", "ORDER", "BY", "LIMIT", "OFFSET",
       "FETCH", "FIRST", "NEXT", "ROWS", "ROW", "ONLY", "WITH", "RECURSIVE", "UNION",
@@ -21,7 +28,7 @@ final class BitwiseDivRewrites {
 
   private static final java.util.Set<String> MULDIV_CONN =
       java.util.Set.of("*", "/", "%", "MOD");
-  private static final java.util.Set<String> ARITH_CONN =
+  static final java.util.Set<String> ARITH_CONN =
       java.util.Set.of("*", "/", "%", "MOD", "+", "-");
 
   /** 位运算操作符 & | ^ ~ << >> 与整除 DIV（MySQL/PostgreSQL；Calcite 解析器不支持）
@@ -40,14 +47,65 @@ final class BitwiseDivRewrites {
     if (!hasBitwiseDivOp(sql, live)) {
       return sql;
     }
+    // MATCH_RECOGNIZE 的 PATTERN (...) 内 | 是模式或语法——不是位运算；按段切分，
+    // 仅对模式段之外的文本做改写
+    List<int[]> spans = matchRecognizePatternSpans(sql, live);
+    if (spans == null) {
+      return rewriteAll(sql);
+    }
+    StringBuilder out = new StringBuilder(sql.length());
+    int pos = 0;
+    for (int[] span : spans) {
+      out.append(rewriteAll(sql.substring(pos, span[0]))).append(sql, span[0], span[1]);
+      pos = span[1];
+    }
+    out.append(rewriteAll(sql.substring(pos)));
+    return out.toString();
+  }
+
+  /** 全语句位运算/DIV 改写（无 MATCH_RECOGNIZE 时的原路径）。 */
+  private static String rewriteAll(String sql) {
     sql = rewriteBitNot(sql);
     sql = rewriteBinaryOp(sql, "DIV", "CROSSDB_IDIV", java.util.Set.of());
-    sql = rewriteBinaryOp(sql, "<<", "CROSSDB_SHL", MULDIV_CONN);
-    sql = rewriteBinaryOp(sql, ">>", "CROSSDB_SHR", MULDIV_CONN);
+    sql = rewriteBinaryOp(sql, "<<", "CROSSDB_SHL", ARITH_CONN);
+    sql = rewriteBinaryOp(sql, ">>", "CROSSDB_SHR", ARITH_CONN);
     sql = rewriteBinaryOp(sql, "&", "CROSSDB_BITAND", ARITH_CONN);
     sql = rewriteBinaryOp(sql, "^", "CROSSDB_BITXOR", ARITH_CONN);
     sql = rewriteBinaryOp(sql, "|", "CROSSDB_BITOR", ARITH_CONN);
     return sql;
+  }
+
+  /** 语句含 MATCH_RECOGNIZE 时返回各 PATTERN (...) 段的 {起, 止}（含括号，按序）；
+   * 无 MATCH_RECOGNIZE 返回 null（调用方走原路径）。 */
+  private static List<int[]> matchRecognizePatternSpans(String sql, boolean[] live) {
+    boolean hasMr = false;
+    for (int i = 0; i < sql.length() && !hasMr; i++) {
+      if (live[i] && (sql.charAt(i) == 'm' || sql.charAt(i) == 'M')
+          && wordEquals(sql, i, "MATCH_RECOGNIZE") && isWordStart(sql, live, i)
+          && isWordEnd(sql, live, i + "MATCH_RECOGNIZE".length())) {
+        hasMr = true;
+      }
+    }
+    if (!hasMr) {
+      return null;
+    }
+    List<int[]> spans = new ArrayList<>();
+    for (int i = 0; i < sql.length(); i++) {
+      if (!live[i] || (sql.charAt(i) != 'p' && sql.charAt(i) != 'P')
+          || !wordEquals(sql, i, "PATTERN") || !isWordStart(sql, live, i)
+          || !isWordEnd(sql, live, i + 7)) {
+        continue;
+      }
+      int open = skipBlank(sql, live, i + 7);
+      if (open < sql.length() && live[open] && sql.charAt(open) == '(') {
+        int end = matchParen(sql, live, open);
+        if (end > 0) {
+          spans.add(new int[]{i, end});
+          i = end - 1;
+        }
+      }
+    }
+    return spans;
   }
 
   /** 语句中是否存在活字符的位运算/DIV 操作符（|| 与 && 不算）。 */
@@ -161,14 +219,14 @@ final class BitwiseDivRewrites {
 
   /** signPos 处的 +/- 是否为一元符号：其前（跳过空白）不是原子结尾（标识符/
    * 数字/右括号/字面量）即为符号，否则为二元操作符。 */
-  private static boolean signIsUnary(String sql, boolean[] live, int signPos) {
+  static boolean signIsUnary(String sql, boolean[] live, int signPos) {
     int p = skipBlankBack(sql, live, signPos - 1);
     return p < 0 || !live[p] || !isAtomEnder(sql.charAt(p));
   }
 
   /** 目标操作符左操作数起点：单原子 + 向左按连接符扩展（+/- 需原子邻接判定
    * 二元/符号）。返回起点下标，失败 -1。 */
-  private static int scanOperandLeft(String sql, boolean[] live, int opStart,
+  static int scanOperandLeft(String sql, boolean[] live, int opStart,
       java.util.Set<String> connectors) {
     int i = skipBlankBack(sql, live, opStart - 1);
     int atomStart = atomLeft(sql, live, i);
@@ -198,7 +256,7 @@ final class BitwiseDivRewrites {
 
   /** 目标操作符右操作数终点：单原子 + 向右按连接符扩展。返回终点下标（排他），
    * 失败 -1。 */
-  private static int scanOperandRight(String sql, boolean[] live, int opEnd,
+  static int scanOperandRight(String sql, boolean[] live, int opEnd,
       java.util.Set<String> connectors) {
     int i = skipBlank(sql, live, opEnd);
     int atomEnd = atomRight(sql, live, i, true);
@@ -221,7 +279,7 @@ final class BitwiseDivRewrites {
   }
 
   /** j 处（活字符）是否为连接符：返回 {起点, 终点}，非连接符返回 null。 */
-  private static int[] connectorAtRight(String sql, boolean[] live, int j,
+  static int[] connectorAtRight(String sql, boolean[] live, int j,
       java.util.Set<String> connectors) {
     if (j >= sql.length() || !live[j]) {
       return null;
@@ -241,7 +299,7 @@ final class BitwiseDivRewrites {
   }
 
   /** j 处（活字符，含 j）向左的连接符：返回 {起点, 终点+1}。 */
-  private static int[] connectorAtLeft(String sql, boolean[] live, int j,
+  static int[] connectorAtLeft(String sql, boolean[] live, int j,
       java.util.Set<String> connectors) {
     if (j < 0 || !live[j]) {
       return null;
@@ -264,7 +322,7 @@ final class BitwiseDivRewrites {
   /** 自 i（活字符）起向右扫一个原子：字面量（死区）/ 括号组 / 函数调用 /
    * 点分标识符 / 数值字面量（含指数）；allowSign 允许前导 +/- 符号。返回原子
    * 终点（排他），无法识别返回 -1。表达式边界关键字不是原子。 */
-  private static int atomRight(String sql, boolean[] live, int i, boolean allowSign) {
+  static int atomRight(String sql, boolean[] live, int i, boolean allowSign) {
     int n = sql.length();
     if (i >= n) {
       return -1;
@@ -311,11 +369,13 @@ final class BitwiseDivRewrites {
       if (word.equals("TRUE") || word.equals("FALSE")) {
         return j;
       }
-      if (EXPR_KEYWORDS.contains(word)) {
+      int k = skipBlank(sql, live, j);
+      boolean followedByParen = k < n && live[k] && sql.charAt(k) == '(';
+      if (EXPR_KEYWORDS.contains(word)
+          && !(followedByParen && FUNC_PREFIXES.contains(word))) {
         return -1;
       }
-      int k = skipBlank(sql, live, j);
-      if (k < n && live[k] && sql.charAt(k) == '(') {
+      if (followedByParen) {
         int end = matchParen(sql, live, k);
         return end < 0 ? -1 : end;
       }
@@ -326,7 +386,7 @@ final class BitwiseDivRewrites {
 
   /** 自 i（活字符）起向左扫一个原子（i 为原子最后一个字符）：返回原子起点，
    * 无法识别返回 -1。 */
-  private static int atomLeft(String sql, boolean[] live, int i) {
+  static int atomLeft(String sql, boolean[] live, int i) {
     if (i < 0) {
       return -1;
     }
@@ -351,7 +411,10 @@ final class BitwiseDivRewrites {
         }
         String word = wordAt(sql, j + 1).toUpperCase();
         if (EXPR_KEYWORDS.contains(word)) {
-          return start;   // 关键字后随括号（如 IN (…)）不是函数调用
+          if (!FUNC_PREFIXES.contains(word)) {
+            return start;   // 关键字后随括号（如 IN (…)）不是函数调用
+          }
+          // CAST( / TIMESTAMP( 等类型函数前缀：并入原子
         }
         return j + 1;
       }
@@ -406,7 +469,7 @@ final class BitwiseDivRewrites {
   }
 
   /** 自 start 起向左跳过空白，返回最后一个活字符下标；无则返回 -1。 */
-  private static int skipBlankBack(String sql, boolean[] live, int start) {
+  static int skipBlankBack(String sql, boolean[] live, int start) {
     int i = start;
     while (i >= 0 && (!live[i] || Character.isWhitespace(sql.charAt(i)))) {
       i--;
