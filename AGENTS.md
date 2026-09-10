@@ -15,9 +15,9 @@ virtual threads).
   - `AntiBindJoinFilterRule` (+ `AntiBindJoinRule` for calc-shaped trees) — rewrites decorrelated `NOT EXISTS` (LEFT join + constant marker `IS NULL`) into ANTI Bind Join, and `EXISTS` marker forms into SEMI; rejects user-written real-column `IS [NOT] NULL` filters via the constant-marker check
   - `ShardTopNRule` — pushes ORDER BY + LIMIT into every branch of a cross-DB UNION ALL (each source returns offset+fetch rows; local merge keeps semantics). `CrossDb.queryProgram` also **removes upstream `EnumerableMergeUnionRule`** from the planner: it pushes `(offset+fetch)` limits into union branches even for UNION DISTINCT, truncating before dedup (loses rows); do not re-add it
   - `MultiArgCountRule` — rewrites MySQL-style multi-arg `COUNT(a, b)` into portable `COUNT(CASE WHEN a IS NOT NULL AND b IS NOT NULL THEN 1 END)` so it can push down
-  - `SqlRewrites` — parse-stage (pre-validation) semantic-preserving rewrites for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` → local UDF/UDAF implementations, `DECODE` → `CASE WHEN … IS NOT DISTINCT FROM` (Oracle NULL=NULL equality), `LEFT SEMI/ANTI JOIN` → equivalent `CROSS APPLY (SELECT 1 … HAVING COUNT(*) …)`, `FETCH FIRST n ROWS WITH TIES` → first-n-distinct-keys `IN` semi-join (bare-column keys that also appear in the SELECT list), `REGEXP` → `RLIKE` → local `CROSSDB_REGEXP` (Java regex, case-sensitive), `BOOL_AND/BOOL_OR/EVERY` → local UDAFs, `LISTAGG … ON OVERFLOW ERROR` clause stripped (standard default), row-constructor `< <= > >=` expanded into lexicographic scalar comparisons. Unsafe forms are left untouched for the validator
-  - `CrossDbFunctions` — local scalar UDF implementations registered by `SqlRewrites` (three-valued NULL logic); keeps behavior identical regardless of which source DB evaluates what
-  - `CrossDbAggregates` — local aggregate/window UDAF implementations (`CROSSDB_LISTAGG` distinct-listagg, `CROSSDB_MEDIAN`, `CROSSDB_PERCENTILE_CONT`, `CROSSDB_NTH_VALUE2/3/4` frame-aware nth-value, `CROSSDB_BOOL_AND/BOOL_OR` three-valued booleans) + `TIMESTAMPDIFF` evaluation; wired in by `SqlRewrites`
+  - `SqlRewrites` — parse-stage (pre-validation) semantic-preserving rewrites for dialect compatibility: `TOP n` → `FETCH FIRST`, `SIMILAR TO` / `INITCAP` / `OVERLAY` / `FLOOR・CEIL(ts TO unit)` → local UDFs, `VAR_*/STDDEV_*` args `CAST AS DOUBLE`, `CUME_DIST/PERCENT_RANK` equivalent rewrites, `NTH_VALUE` → per-arity local window UDAFs (frame-aware), `TIMESTAMPDIFF` / `LISTAGG(DISTINCT …)` / `MEDIAN` / `PERCENTILE_CONT … WITHIN GROUP` / `PERCENTILE_DISC` → local UDF/UDAF implementations, `DECODE` → `CASE WHEN … IS NOT DISTINCT FROM` (Oracle NULL=NULL equality), `IIF` → `CASE WHEN`, `ISNULL` → `COALESCE`, `ILIKE` → `LOWER(x) LIKE LOWER(p)`, `TRANSLATE` → local UDF (name clashes with the std `SqlTranslateFunction`), `ANY_VALUE`/`MODE`/`ARRAY_AGG` → local UDAFs (ARRAY_AGG renders `"[v1, v2, …]"`, value-ascending), `AGG(x) FILTER (WHERE …) OVER` → `AGG(CASE WHEN … THEN x END) OVER` (validator rejects FILTER+OVER; note pre-validation std aggregates are still unbound — `isAggregator()` is false, match by name), `FIRST_VALUE/LAST_VALUE … IGNORE NULLS OVER` → local non-null-end UDAFs, `COUNT(DISTINCT x) OVER` → local distinct-count window UDAF (upstream `EnumerableWindow` silently drops the DISTINCT qualifier), `LEFT SEMI/ANTI JOIN` → equivalent `CROSS APPLY (SELECT 1 … HAVING COUNT(*) …)`, `FETCH FIRST n ROWS WITH TIES` → first-n-distinct-keys `IN` semi-join (bare-column keys that also appear in the SELECT list), `REGEXP` → `RLIKE` → local `CROSSDB_REGEXP` (Java regex, case-sensitive), `BOOL_AND/BOOL_OR/EVERY` → local UDAFs, `LISTAGG … ON OVERFLOW ERROR` clause stripped (standard default), row-constructor `< <= > >=` expanded into lexicographic scalar comparisons, trailing statement semicolons stripped. Unsafe forms are left untouched for the validator
+  - `CrossDbFunctions` — local scalar UDF implementations registered by `SqlRewrites` (three-valued NULL logic): includes `CROSSDB_TRANSLATE`, `SOUNDEX`, `LTRIM`/`RTRIM`; keeps behavior identical regardless of which source DB evaluates what
+  - `CrossDbAggregates` — local aggregate/window UDAF implementations (`CROSSDB_LISTAGG` distinct-listagg, `CROSSDB_MEDIAN`, `CROSSDB_PERCENTILE_CONT/DISC`, `CROSSDB_NTH_VALUE2/3/4` frame-aware nth-value, `CROSSDB_BOOL_AND/BOOL_OR` three-valued booleans, `CROSSDB_ARRAY_AGG`, `CROSSDB_ANY_VALUE`, `CROSSDB_MODE`, `CROSSDB_COUNT_DISTINCT`, `CROSSDB_FIRST/LAST_VALUE_NN`) + `TIMESTAMPDIFF` evaluation; wired in by `SqlRewrites`. Note: UDAFs are registered with `requiresOrder=false` so they can serve order-less windows, and the Calcite UDAF pipeline pre-filters NULL inputs (empty/all-NULL groups yield NULL)
   - `EnumerableBindJoin` (Calcite physical rel) + `BindJoinExec` (streaming runtime; SEMI/ANTI both pass `semi=true`, ANTI additionally `anti=true`)
   - `Guarded` — DataSource proxy enforcing fetchSize, row-limit breaker, queryTimeout, statement cancel registry
   - `Stats` — per-query execution stats (SQL actually sent per source, rows pulled, Bind Join batches); exposed via `analyze()`
@@ -32,7 +32,7 @@ virtual threads).
 ## Commands
 
 ```bash
-mvn test                                                    # all JUnit 5 tests, both modules (671; 19 @Disabled("待支持: …") compatibility cases skip by design)
+mvn test                                                    # all JUnit 5 tests, both modules (778; 14 @Disabled("待支持: …") compatibility cases skip by design)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 # run with -DargLine="-Duser.timezone=UTC" on a non-UTC machine: TIMESTAMP values
@@ -48,17 +48,28 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
   up new H2 instances.
 - `crossdb-core` must stay Spring-free; only the starter module touches Spring.
 - Features not yet supported are covered by tests marked `@Disabled("待支持: …")`
-  (currently 19: 18 in `CrossDbFullCoverageTest`, 1 in `CrossDbComprehensiveTest`) —
+  (currently 14: 1 GROUPS frame in `CrossDbFullCoverageTest`, 1 MATCH_RECOGNIZE in
+  `CrossDbComprehensiveTest`, 12 dialect candidates in `CrossDbFullScenariosTest`) —
   they are the tracked fix backlog. Keep the assertions at standard semantics; fix
-  the engine and re-enable rather than deleting or weakening them. The former
-  4-case backlog in `CrossDbCoverageTest` (EXISTS+HAVING 聚合、FETCH FIRST … WITH
-  TIES、DECODE、LEFT SEMI JOIN) and the former 5-case backlog in
+  the engine and re-enable rather than deleting or weakening them. Former backlogs
+  fixed and re-enabled: the 4-case set in `CrossDbCoverageTest` (EXISTS+HAVING
+  聚合、FETCH FIRST … WITH TIES、DECODE、LEFT SEMI JOIN), the 5-case set in
   `CrossDbComprehensiveTest` (UNION DISTINCT + OFFSET/FETCH、行构造器不等比较、
-  BOOL_AND/BOOL_OR、REGEXP、LISTAGG ON OVERFLOW) were fixed and re-enabled;
-  MATCH_RECOGNIZE remains disabled (upstream Enumerable gap).
+  BOOL_AND/BOOL_OR、REGEXP、LISTAGG ON OVERFLOW), and the 17-case set in
+  `CrossDbFullCoverageTest` (TRANSLATE、SOUNDEX、IIF、ISNULL、LTRIM/RTRIM、ILIKE、
+  PERCENTILE_DISC、ARRAY_AGG、ANY_VALUE、MODE、COUNT(DISTINCT) OVER、FILTER+OVER、
+  RANGE 间隔帧、EXCLUDE NO OTHERS、IGNORE NULLS、尾分号、UNION 列标签).
+  MATCH_RECOGNIZE remains disabled (needs a self-built row-pattern physical
+  operator; upstream EnumerableMatch is incomplete), and GROUPS frames are blocked
+  by the parser (equivalent rewrite would need a DENSE_RANK derived-table wrap).
 
 ## Gotchas
 
+- `CrossDb.plan()` appends a rename/trim projection whenever the optimized rel's
+  field names drift from the validated row type — JDBC pushdown absorbs projection
+  aliases into source scans (labels fall back to catalog column names) and
+  `RelRoot.isRefTrivial()` alone doesn't catch it. ResultSet labels therefore
+  follow validated output names (aliases, UNION first-branch names).
 - One `query(sql)` ResultSet = one streaming consumption (no reset/re-iteration);
   one concurrent query per `CrossDb` instance (CalciteConnection is not
   thread-safe). Do not add concurrent query paths.

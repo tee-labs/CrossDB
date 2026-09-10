@@ -276,7 +276,9 @@ final class Exec {
       default -> throw new SQLException("crossdb: 列值无法转 BigDecimal（实际 "
           + v.getClass().getName() + "）");
     };
-    return args.length > 1 ? d.setScale(((Number) args[1]).intValue()) : d;
+    // JDBC 语义：指定 scale 收窄精度时按 HALF_UP 舍入（1.25 → scale 1 → 1.3）
+    return args.length > 1
+        ? d.setScale(((Number) args[1]).intValue(), java.math.RoundingMode.HALF_UP) : d;
   }
 
   /** 时间型统一转换：target 为 Timestamp/Date/Time 之一，NULL 返回 null；
@@ -340,7 +342,16 @@ final class Exec {
   private static int findColumn(List<String> names, String column) throws SQLException {
     int i = names.indexOf(column);
     if (i < 0) {
-      i = names.indexOf(column.toUpperCase());
+      // 列名按校验行型保留书写形态（别名/小写），查找做大小写不敏感回退
+      i = names.indexOf(column.toLowerCase());
+    }
+    if (i < 0) {
+      for (int j = 0; j < names.size(); j++) {
+        if (names.get(j).equalsIgnoreCase(column)) {
+          i = j;
+          break;
+        }
+      }
     }
     if (i < 0) {
       throw new SQLException("crossdb: 列不存在 " + column + "（可用列 " + names + "）");

@@ -140,45 +140,35 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: TRANSLATE 未注册（Oracle 语义，可经本地 UDF 实现），待支持")
-    void translateOracle() throws Exception {
+    @Test void translateOracle() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("a23x5", scalar(db, "SELECT TRANSLATE('12345', '14', 'ax') "
             + "FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: SOUNDEX 未注册（可经本地 UDF 实现），待支持")
-    void soundexFunction() throws Exception {
+    @Test void soundexFunction() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("R163", scalar(db, "SELECT SOUNDEX('Robert') FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: IIF 未注册（SQL Server 方言，可改写为 CASE WHEN），待支持")
-    void iifSqlServer() throws Exception {
+    @Test void iifSqlServer() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("y", scalar(db, "SELECT IIF(1 < 2, 'y', 'n') FROM userdb.small LIMIT 1"));
       }
     }
 
-    @Test
-    @Disabled("待支持: ISNULL 未注册（SQL Server 方言，可改写为 COALESCE），待支持")
-    void isnullSqlServer() throws Exception {
+    @Test void isnullSqlServer() throws Exception {
       try (CrossDb db = all()) {
         assertEquals(List.of("a", "b", "x"), rows(db, "SELECT ISNULL(note, 'x') "
             + "FROM pingdb.pings ORDER BY id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: LTRIM/RTRIM 未注册（可经本地 UDF 实现），待支持")
-    void ltrimRtrim() throws Exception {
+    @Test void ltrimRtrim() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals(List.of("x", "y"), rows(db, "SELECT LTRIM(' x'), RTRIM('y ') "
+        assertEquals(List.of("x,y"), rows(db, "SELECT LTRIM(' x'), RTRIM('y ') "
             + "FROM userdb.small LIMIT 1"));
       }
     }
@@ -211,9 +201,7 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: ILIKE 未注册（可改写为 LOWER(x) LIKE LOWER(p)），待支持")
-    void ilikeCaseInsensitive() throws Exception {
+    @Test void ilikeCaseInsensitive() throws Exception {
       try (CrossDb db = core()) {
         assertEquals("true", scalar(db, "SELECT 'ALICE' ILIKE 'a%' FROM userdb.small LIMIT 1"));
       }
@@ -280,54 +268,47 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: PERCENTILE_DISC 未实现（Enumerable 无原生实现，"
-        + "可仿 CROSSDB_PERCENTILE_CONT 补本地 UDAF），待支持")
-    void percentileDiscOrderedSet() throws Exception {
+    @Test void percentileDiscOrderedSet() throws Exception {
+      // 标准 PERCENTILE_DISC(0.5)：升序 [1,5,10,20] 取第 ceil(0.5*4)=2 位 → 5
       try (CrossDb db = core()) {
-        assertEquals("10", scalar(db, "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP "
+        assertEquals("5", scalar(db, "SELECT PERCENTILE_DISC(0.5) WITHIN GROUP "
             + "(ORDER BY amount) FROM orderdb.orders"));
       }
     }
 
-    @Test
-    @Disabled("待支持: ARRAY_AGG 无 Enumerable 实现，待支持")
-    void arrayAggAggregate() throws Exception {
+    @Test void arrayAggAggregate() throws Exception {
+      // 引擎以 "[v1, v2, ...]" 字符串渲染承载 ARRAY_AGG（不支持 ARRAY 值类型透出）
       try (CrossDb db = core()) {
         assertEquals("[1, 2]", scalar(db, "SELECT ARRAY_AGG(id ORDER BY id) FROM userdb.small"));
       }
     }
 
-    @Test
-    @Disabled("待支持: ANY_VALUE 未注册（MySQL 方言，可经本地 UDAF 实现），待支持")
-    void anyValueMySql() throws Exception {
+    @Test void anyValueMySql() throws Exception {
+      // ANY_VALUE 语义上非确定，本地取首见非 NULL 值（users 按 id 序扫描 → alice）
       try (CrossDb db = core()) {
         assertEquals("alice", scalar(db, "SELECT ANY_VALUE(name) FROM userdb.users"));
       }
     }
 
-    @Test
-    @Disabled("待支持: MODE 未注册（有序众数聚合，可经本地 UDAF 实现），待支持")
-    void modeAggregate() throws Exception {
+    @Test void modeAggregate() throws Exception {
+      // user_id 频次 {1:2, 2:2} 并列，取最小值（Oracle 语义）→ 1
       try (CrossDb db = core()) {
         assertEquals("1", scalar(db, "SELECT MODE(user_id) FROM orderdb.orders"));
       }
     }
 
-    @Test
-    @Disabled("待支持: 窗口聚合不支持 DISTINCT 量化符（Calcite 校验器拒绝），待支持")
-    void countDistinctOverWindow() throws Exception {
+    @Test void countDistinctOverWindow() throws Exception {
+      // user_id {1,2,1,2} 去重计数 = 2；上游 EnumerableWindow 会静默丢 DISTINCT，本地 UDAF 修正
       try (CrossDb db = core()) {
         assertEquals(List.of("100,2", "101,2", "102,2", "103,2"), rows(db,
             "SELECT id, COUNT(DISTINCT user_id) OVER () FROM orderdb.orders ORDER BY id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: 聚合 FILTER 子句与 OVER 组合无 Enumerable 实现，待支持")
-    void filterInsideWindow() throws Exception {
+    @Test void filterInsideWindow() throws Exception {
+      // amount>5 过滤后 10+20=30，窗口帧为整分区
       try (CrossDb db = core()) {
-        assertEquals(List.of("100,1", "101,1", "102,1", "103,1"), rows(db,
+        assertEquals(List.of("100,30", "101,30", "102,30", "103,30"), rows(db,
             "SELECT id, SUM(amount) FILTER (WHERE amount > 5) OVER () "
                 + "FROM orderdb.orders ORDER BY id"));
       }
@@ -341,7 +322,8 @@ class CrossDbFullCoverageTest {
   class Windows2 {
 
     @Test
-    @Disabled("待支持: 解析器不支持 GROUPS 帧模式（SQL:2011），待支持")
+    @Disabled("待支持: 解析器不支持 GROUPS 帧关键字（SQL:2011）；等价改写需把窗口"
+        + " ORDER BY 换成派生表 DENSE_RANK 分组列再转 RANGE 帧，待支持")
     void groupsFrameCountsPeerGroups() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("100,10", "101,30", "102,25", "103,6"), rows(db,
@@ -384,33 +366,29 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: RANGE 时间间隔帧无 Enumerable 实现，待支持")
-    void rangeIntervalFrameOnTimestamp() throws Exception {
+    @Test void rangeIntervalFrameOnTimestamp() throws Exception {
+      // 1 小时回看窗：log1/2 相距 5 分 55 秒同窗（计 2）、log3/4 相距 30 分钟同窗（计 2）
       try (CrossDb db = all()) {
-        assertEquals(List.of("1,1", "2,1", "3,1", "4,1"), rows(db,
+        assertEquals(List.of("1,1", "2,2", "3,1", "4,2"), rows(db,
             "SELECT id, COUNT(*) OVER (ORDER BY ts RANGE BETWEEN INTERVAL '1' HOUR "
                 + "PRECEDING AND CURRENT ROW) FROM logdb.logs ORDER BY id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: 窗口帧 EXCLUDE 子句（SQL:2016）解析器不支持，待支持")
-    void frameExcludeClause() throws Exception {
+    @Test void frameExcludeClause() throws Exception {
+      // EXCLUDE NO OTHERS 为缺省恒等形态：累计计数 1..4
       try (CrossDb db = core()) {
-        assertEquals(List.of("100,1", "101,2", "102,2", "103,2"), rows(db,
+        assertEquals(List.of("100,1", "101,2", "102,3", "103,4"), rows(db,
             "SELECT id, COUNT(*) OVER (ORDER BY id ROWS BETWEEN UNBOUNDED PRECEDING "
                 + "AND CURRENT ROW EXCLUDE NO OTHERS) FROM orderdb.orders ORDER BY id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: FIRST_VALUE/LAST_VALUE IGNORE NULLS 无 Enumerable 实现，待支持")
-    void firstValueIgnoreNulls() throws Exception {
+    @Test void firstValueIgnoreNulls() throws Exception {
       try (CrossDb db = all()) {
         assertEquals(List.of("1,a", "2,a", "3,a"), rows(db,
             "SELECT id, FIRST_VALUE(note) IGNORE NULLS OVER (ORDER BY id) "
-                + "FROM pingdb.pings ORDER BY id"));
+            + "FROM pingdb.pings ORDER BY id"));
       }
     }
   }
@@ -980,9 +958,7 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: 解析器不接受语句尾分号（可预处理安全剥离），待支持")
-    void trailingSemicolonAccepted() throws Exception {
+    @Test void trailingSemicolonAccepted() throws Exception {
       try (CrossDb db = core()) {
         assertEquals(List.of("2"), rows(db, "SELECT id FROM userdb.users WHERE id = 2;"));
       }
@@ -995,9 +971,7 @@ class CrossDbFullCoverageTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: UNION 输出列标签未沿用首分支别名（元数据保真，回退到底层列名），待支持")
-    void unionMetadataFromFirstBranch() throws Exception {
+    @Test void unionMetadataFromFirstBranch() throws Exception {
       try (CrossDb db = core()) {
         try (ResultSet rs = db.query("SELECT id AS uid FROM userdb.users WHERE id = 1 "
             + "UNION ALL SELECT id FROM userdb.small WHERE id = 2")) {

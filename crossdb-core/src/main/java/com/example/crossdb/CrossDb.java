@@ -207,10 +207,17 @@ public class CrossDb implements AutoCloseable {
       }
       best = planner.transform(0, required, root.rel);
       // 优化后行型可能宽于验证后的输出行型（如 ORDER BY 引用未 SELECT 的列/表达式键，
-      // 排序列会留在计划输出里），按 root.fields 补最终投影裁掉，避免输出列泄漏
+      // 排序列会留在计划输出里），按 root.fields 补最终投影裁掉，避免输出列泄漏；
+      // 字段名保真同理：JDBC 下推会把投影别名吸收进源库扫描（回退底层列名），
+      // 恒等映射时 isRefTrivial 不触发，需按名校验，名字漂移即补重命名投影，
+      // 保证 ResultSet 元数据沿用校验器派生的输出列名（别名、UNION 首分支列名）
       final RelNode optimized = best;
       RelRoot trimmed = root.withRel(optimized);
-      if (!trimmed.isRefTrivial()) {
+      List<String> expectedNames = new java.util.ArrayList<>();
+      trimmed.fields.forEach((ordinal, name) -> expectedNames.add(name));
+      boolean namesDrift =
+          !optimized.getRowType().getFieldNames().equals(expectedNames);
+      if (!trimmed.isRefTrivial() || namesDrift) {
         org.apache.calcite.rex.RexBuilder rexBuilder =
             optimized.getCluster().getRexBuilder();
         List<org.apache.calcite.rex.RexNode> exprs = new java.util.ArrayList<>();

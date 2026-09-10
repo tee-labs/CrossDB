@@ -8,6 +8,7 @@ import java.time.ZoneOffset;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 import java.util.TreeSet;
 
 /** 本地求值的内置聚合/窗口聚合（UDAF）与标量日期函数实现：承接 Calcite Enumerable
@@ -296,6 +297,274 @@ public final class CrossDbAggregates {
 
     public static Boolean result(BoolState s) {
       return s.seen ? s.sawTrue : null;
+    }
+  }
+
+  // ---------- PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY x) ----------
+
+  /** 对象值收集状态：保留入参原类型（PERCENTILE_DISC 返回输入类型的值）。 */
+  public static final class ObjectListState {
+    final List<Object> values = new ArrayList<>();
+    double fraction;
+  }
+
+  /** CROSSDB_PERCENTILE_DISC(x, p)：离散百分位（标准 SQL 有序集聚合语义）——
+   * 取升序第 {@code ceil(p*n)} 位（1 基）的输入值，返回类型与输入一致。 */
+  public static final class PercentileDisc {
+    private PercentileDisc() {}
+
+    public static ObjectListState init() {
+      return new ObjectListState();
+    }
+
+    public static ObjectListState add(ObjectListState s, Object v, Object p) {
+      if (v != null && p != null) {
+        s.values.add(v);
+        s.fraction = ((Number) p).doubleValue();
+      }
+      return s;
+    }
+
+    public static ObjectListState merge(ObjectListState a, ObjectListState b) {
+      a.values.addAll(b.values);
+      a.fraction = b.fraction;
+      return a;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static Object result(ObjectListState s) {
+      int n = s.values.size();
+      if (n == 0) {
+        return null;
+      }
+      List<Object> sorted = new ArrayList<>(s.values);
+      sorted.sort((x, y) -> ((Comparable) x).compareTo(y));
+      int k = (int) Math.ceil(s.fraction * n);
+      return sorted.get(Math.min(Math.max(k, 1), n) - 1);
+    }
+  }
+
+  // ---------- ARRAY_AGG(x)（VARCHAR 渲染） ----------
+
+  /** 值列表状态：按喂入顺序收集（含 NULL 元素）。 */
+  public static final class ValueListState {
+    final List<Object> values = new ArrayList<>();
+  }
+
+  /** CROSSDB_ARRAY_AGG(x)：数组聚合的本地替身。引擎不支持 ARRAY 值类型透出，
+   * 以 {@code "[v1, v2, ...]"} 字符串渲染承载；Calcite UDAF 管道默认过滤 NULL
+   * 入参（与 LISTAGG 族一致跳过 NULL 元素），全 NULL/空组返回 NULL。喂入顺序
+   * 不保证（WITHIN GROUP 对 UDAF 不强制排序），渲染按值升序保证确定性。 */
+  public static final class ArrayAgg {
+    private ArrayAgg() {}
+
+    public static ValueListState init() {
+      return new ValueListState();
+    }
+
+    public static ValueListState add(ValueListState s, Object v) {
+      s.values.add(v);
+      return s;
+    }
+
+    public static ValueListState merge(ValueListState a, ValueListState b) {
+      a.values.addAll(b.values);
+      return a;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static String result(ValueListState s) {
+      if (s.values.isEmpty()) {
+        return null;
+      }
+      List<Object> sorted = new ArrayList<>(s.values);
+      sorted.sort((x, y) -> ((Comparable) x).compareTo(y));
+      StringBuilder b = new StringBuilder("[");
+      for (int i = 0; i < sorted.size(); i++) {
+        if (i > 0) {
+          b.append(", ");
+        }
+        b.append(String.valueOf(sorted.get(i)));
+      }
+      return b.append(']').toString();
+    }
+  }
+
+  // ---------- ANY_VALUE(x)（MySQL） / MODE(x)（Oracle） ----------
+
+  /** 首见非 NULL 状态：ANY_VALUE 语义上非确定，本地取首见值保证确定性。 */
+  public static final class AnyValueState {
+    Object value;
+    boolean set;
+  }
+
+  /** CROSSDB_ANY_VALUE：组内任取一值（首见非 NULL；全 NULL/空组返回 NULL）。 */
+  public static final class AnyValue {
+    private AnyValue() {}
+
+    public static AnyValueState init() {
+      return new AnyValueState();
+    }
+
+    public static AnyValueState add(AnyValueState s, Object v) {
+      if (v != null && !s.set) {
+        s.value = v;
+        s.set = true;
+      }
+      return s;
+    }
+
+    public static AnyValueState merge(AnyValueState a, AnyValueState b) {
+      return a.set ? a : b;
+    }
+
+    public static Object result(AnyValueState s) {
+      return s.set ? s.value : null;
+    }
+  }
+
+  /** 频次统计状态：按值自然序（TreeMap）以便并列时取最小值。 */
+  public static final class ModeState {
+    final java.util.TreeMap<Object, Long> counts = new java.util.TreeMap<>();
+  }
+
+  /** CROSSDB_MODE：众数（出现频次最高的值，跳过 NULL；频次并列取最小值——
+   * Oracle 语义）；空组返回 NULL。 */
+  public static final class Mode {
+    private Mode() {}
+
+    public static ModeState init() {
+      return new ModeState();
+    }
+
+    public static ModeState add(ModeState s, Object v) {
+      if (v != null) {
+        s.counts.merge(v, 1L, Long::sum);
+      }
+      return s;
+    }
+
+    public static ModeState merge(ModeState a, ModeState b) {
+      b.counts.forEach((k, c) -> a.counts.merge(k, c, Long::sum));
+      return a;
+    }
+
+    @SuppressWarnings({"unchecked", "rawtypes"})
+    public static Object result(ModeState s) {
+      Object best = null;
+      long bestCount = 0;
+      for (Map.Entry<Object, Long> e : s.counts.entrySet()) {
+        if (e.getValue() > bestCount) {
+          best = e.getKey();
+          bestCount = e.getValue();
+        }
+      }
+      return best;
+    }
+  }
+
+  // ---------- COUNT(DISTINCT x) OVER w（窗口去重计数） ----------
+
+  /** CROSSDB_COUNT_DISTINCT：窗口内去重计数（跳过 NULL）。Calcite EnumerableWindow
+   * 静默丢弃窗口聚合的 DISTINCT 量化符（返回 COUNT(*) 语义），改写层把
+   * {@code COUNT(DISTINCT x) OVER w} 挂载到本实现修正。 */
+  public static final class CountDistinct {
+    private CountDistinct() {}
+
+    public static java.util.HashSet<Object> init() {
+      return new java.util.HashSet<>();
+    }
+
+    public static java.util.HashSet<Object> add(java.util.HashSet<Object> s, Object v) {
+      if (v != null) {
+        s.add(v);
+      }
+      return s;
+    }
+
+    public static java.util.HashSet<Object> merge(java.util.HashSet<Object> a,
+        java.util.HashSet<Object> b) {
+      a.addAll(b);
+      return a;
+    }
+
+    public static Long result(java.util.HashSet<Object> s) {
+      return (long) s.size();
+    }
+  }
+
+  // ---------- FIRST_VALUE / LAST_VALUE IGNORE NULLS ----------
+
+  /** 首/末非 NULL 状态。 */
+  public static final class NonNullEndsState {
+    Object first;
+    Object last;
+  }
+
+  /** CROSSDB_FIRST_VALUE_NN：帧内首个非 NULL（EnumerableWindow 按当前帧喂数，
+   * 喂入顺序即帧内行序——与 FIRST_VALUE(x) IGNORE NULLS 标准语义一致）。 */
+  public static final class FirstNonNull {
+    private FirstNonNull() {}
+
+    public static NonNullEndsState init() {
+      return new NonNullEndsState();
+    }
+
+    public static NonNullEndsState add(NonNullEndsState s, Object v) {
+      if (v != null) {
+        if (s.first == null) {
+          s.first = v;
+        }
+        s.last = v;
+      }
+      return s;
+    }
+
+    public static NonNullEndsState merge(NonNullEndsState a, NonNullEndsState b) {
+      if (a.first == null) {
+        a.first = b.first;
+      }
+      if (b.last != null) {
+        a.last = b.last;
+      }
+      return a;
+    }
+
+    public static Object result(NonNullEndsState s) {
+      return s.first;
+    }
+  }
+
+  /** CROSSDB_LAST_VALUE_NN：帧内末个非 NULL。 */
+  public static final class LastNonNull {
+    private LastNonNull() {}
+
+    public static NonNullEndsState init() {
+      return new NonNullEndsState();
+    }
+
+    public static NonNullEndsState add(NonNullEndsState s, Object v) {
+      if (v != null) {
+        if (s.first == null) {
+          s.first = v;
+        }
+        s.last = v;
+      }
+      return s;
+    }
+
+    public static NonNullEndsState merge(NonNullEndsState a, NonNullEndsState b) {
+      if (a.first == null) {
+        a.first = b.first;
+      }
+      if (b.last != null) {
+        a.last = b.last;
+      }
+      return a;
+    }
+
+    public static Object result(NonNullEndsState s) {
+      return s.last;
     }
   }
 

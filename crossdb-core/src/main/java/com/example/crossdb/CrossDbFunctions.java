@@ -141,6 +141,95 @@ public final class CrossDbFunctions {
     return s == null ? null : new StringBuilder(s).reverse().toString();
   }
 
+  /** TRANSLATE(s, from, to)（Oracle/PostgreSQL 语义）：from→to 按位逐字符映射，
+   * from 多出的字符（to 较短）删除；from 为空返回原串；任一 NULL 返回 NULL。 */
+  public static String translate(String s, String from, String to) {
+    if (s == null || from == null || to == null) {
+      return null;
+    }
+    if (from.isEmpty()) {
+      return s;
+    }
+    StringBuilder b = new StringBuilder(s.length());
+    for (char c : s.toCharArray()) {
+      int idx = from.indexOf(c);
+      if (idx < 0) {
+        b.append(c);
+      } else if (idx < to.length()) {
+        b.append(to.charAt(idx));
+      }
+    }
+    return b.toString();
+  }
+
+  /** SOUNDEX(s)：标准 Soundex 语音编码（首字母 + 三位数字，不足补 0）。
+   * 非字母字符忽略；仅字母时返回空串。 */
+  public static String soundex(String s) {
+    if (s == null) {
+      return null;
+    }
+    String t = s.toUpperCase().replaceAll("[^A-Z]", "");
+    if (t.isEmpty()) {
+      return "";
+    }
+    StringBuilder b = new StringBuilder(4).append(t.charAt(0));
+    int prev = soundexCode(t.charAt(0));
+    for (int i = 1; i < t.length() && b.length() < 4; i++) {
+      char c = t.charAt(i);
+      if (c == 'H' || c == 'W') {
+        continue;   // 不编码，但保留前码（H/W 隔断的同码仍合并）
+      }
+      int d = soundexCode(c);
+      if (d == 0) {
+        prev = 0;   // 元音重置合并基线
+      } else if (d != prev) {
+        b.append((char) ('0' + d));
+        prev = d;
+      }
+    }
+    while (b.length() < 4) {
+      b.append('0');
+    }
+    return b.toString();
+  }
+
+  /** Soundex 辅音码位；元音与 Y/H/W 返回 0（不编码）。 */
+  private static int soundexCode(char c) {
+    return switch (c) {
+      case 'B', 'F', 'P', 'V' -> 1;
+      case 'C', 'G', 'J', 'K', 'Q', 'S', 'X', 'Z' -> 2;
+      case 'D', 'T' -> 3;
+      case 'L' -> 4;
+      case 'M', 'N' -> 5;
+      case 'R' -> 6;
+      default -> 0;
+    };
+  }
+
+  /** LTRIM(s)：去除前导空格（Oracle/PostgreSQL 语义，仅空格字符）。 */
+  public static String ltrim(String s) {
+    if (s == null) {
+      return null;
+    }
+    int i = 0;
+    while (i < s.length() && s.charAt(i) == ' ') {
+      i++;
+    }
+    return s.substring(i);
+  }
+
+  /** RTRIM(s)：去除尾随空格。 */
+  public static String rtrim(String s) {
+    if (s == null) {
+      return null;
+    }
+    int i = s.length();
+    while (i > 0 && s.charAt(i - 1) == ' ') {
+      i--;
+    }
+    return s.substring(0, i);
+  }
+
   /** OVERLAY(s PLACING r FROM from)（标准 SQL，len 默认为 r 的长度）。 */
   public static String overlay3(String s, String r, BigDecimal from) {
     return overlay(s, r, from, r == null ? null : BigDecimal.valueOf(r.length()));

@@ -65,13 +65,24 @@ import java.util.regex.Pattern;
  *   <li>STRING_AGG / GROUP_CONCAT（PostgreSQL/MySQL 聚合）→ 标准 LISTAGG；</li>
  *   <li>DECODE（Oracle，未注册于标准操作符表）→ CASE WHEN .. IS NOT DISTINCT FROM
  *   等价改写（NULL=NULL 相等语义保留）；</li>
+ *   <li>IIF（SQL Server）→ CASE WHEN 等价改写；ISNULL（SQL Server）→ COALESCE；
+ *   ILIKE（PostgreSQL）→ LOWER(x) LIKE LOWER(p)；</li>
+ *   <li>PERCENTILE_DISC / ARRAY_AGG / ANY_VALUE / MODE → 本地 UDAF（Enumerable
+ *   无实现或引擎不支持 ARRAY 值类型，ARRAY_AGG 以 {@code "[..]"} 字符串渲染）；</li>
+ *   <li>AGG(x) FILTER (WHERE c) OVER w → AGG(CASE WHEN c THEN x END) OVER w
+ *   （校验器拒绝 FILTER 与 OVER 组合；跳 NULL 语义聚合上等价）；</li>
+ *   <li>FIRST_VALUE/LAST_VALUE(x) IGNORE NULLS OVER w → 本地首/末非 NULL 端点
+ *   窗口聚合（Enumerable 无 IGNORE NULLS 实现）；</li>
+ *   <li>COUNT(DISTINCT x) OVER w → CROSSDB_COUNT_DISTINCT 窗口聚合
+ *   （EnumerableWindow 静默丢弃 DISTINCT 量化符，错误地得到 COUNT(*) 语义）；</li>
  *   <li>LEFT SEMI/ANTI JOIN（Calcite 解析器不支持的语法）→ 等价 CROSS APPLY
  *   (SELECT 1 .. HAVING COUNT(*) 比较)；</li>
  *   <li>FETCH FIRST n ROWS WITH TIES（Calcite 解析器不支持）→ 「前 n 个去重键组」
  *   等价 IN 半连接改写（裸列键）；</li>
  *   <li>USING 共享列裸引用（Calcite 校验器 AssertionError，上游缺陷）→ 等价 ON
  *   等值连接 + 裸引用替换为 COALESCE(l.c, r.c)；</li>
- *   <li>表别名列名清单 FROM t(a, b)（标准 SQL）→ 派生表列重命名。</li>
+ *   <li>表别名列名清单 FROM t(a, b)（标准 SQL）→ 派生表列重命名；</li>
+ *   <li>语句尾分号（多数驱动接受、Calcite 解析器不接受）→ 预处理剥离。</li>
  * </ul> */
 final class SqlRewrites {
   private SqlRewrites() {}
@@ -137,6 +148,10 @@ final class SqlRewrites {
       udf("CROSSDB_REGEXP", "regexp",
           List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING), SqlTypeName.VARCHAR,
           ReturnTypes.BOOLEAN_NULLABLE);
+  private static final SqlUserDefinedFunction TRANSLATE_FN =
+      udf("CROSSDB_TRANSLATE", "translate",
+          List.of(SqlTypeFamily.STRING, SqlTypeFamily.STRING, SqlTypeFamily.STRING),
+          SqlTypeName.VARCHAR, ARG0_NULLABLE);
 
   private static final SqlUserDefinedAggFunction LISTAGG_DISTINCT_FN =
       aggFn("CROSSDB_LISTAGG", VARCHAR_NULLABLE,
@@ -162,20 +177,45 @@ final class SqlRewrites {
   private static final SqlUserDefinedAggFunction NTH_VALUE4_FN =
       aggFn("CROSSDB_NTH_VALUE4", ANY_NULLABLE, List.of(SqlTypeFamily.ANY),
           CrossDbAggregates.NthValue4.class);
+  private static final SqlUserDefinedAggFunction PERCENTILE_DISC_FN =
+      aggFn("CROSSDB_PERCENTILE_DISC", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY), CrossDbAggregates.PercentileDisc.class);
+  private static final SqlUserDefinedAggFunction ARRAY_AGG_FN =
+      aggFn("CROSSDB_ARRAY_AGG", VARCHAR_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.ArrayAgg.class);
+  private static final SqlUserDefinedAggFunction ANY_VALUE_FN =
+      aggFn("CROSSDB_ANY_VALUE", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.AnyValue.class);
+  private static final SqlUserDefinedAggFunction MODE_FN =
+      aggFn("CROSSDB_MODE", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.Mode.class);
+  private static final SqlUserDefinedAggFunction COUNT_DISTINCT_FN =
+      aggFn("CROSSDB_COUNT_DISTINCT", ReturnTypes.BIGINT_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.CountDistinct.class);
+  private static final SqlUserDefinedAggFunction FIRST_VALUE_NN_FN =
+      aggFn("CROSSDB_FIRST_VALUE_NN", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.FirstNonNull.class);
+  private static final SqlUserDefinedAggFunction LAST_VALUE_NN_FN =
+      aggFn("CROSSDB_LAST_VALUE_NN", ANY_NULLABLE,
+          List.of(SqlTypeFamily.ANY), CrossDbAggregates.LastNonNull.class);
 
   /** 注册进引擎操作符表的本地 UDAF（名字 SQL 不可见，仅由解析期改写挂载）。 */
   private static final List<org.apache.calcite.sql.SqlOperator> AGGS = List.of(
       LISTAGG_DISTINCT_FN, MEDIAN_FN, PERCENTILE_CONT_FN,
-      NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN, BOOL_AND_FN, BOOL_OR_FN);
+      NTH_VALUE2_FN, NTH_VALUE3_FN, NTH_VALUE4_FN, BOOL_AND_FN, BOOL_OR_FN,
+      PERCENTILE_DISC_FN, ARRAY_AGG_FN, ANY_VALUE_FN, MODE_FN, COUNT_DISTINCT_FN,
+      FIRST_VALUE_NN_FN, LAST_VALUE_NN_FN);
 
   private static SqlUserDefinedAggFunction aggFn(String name, SqlReturnTypeInference ret,
       List<SqlTypeFamily> fams, Class<?> impl) {
     SqlOperandMetadata meta = OperandTypes.operandMetadata(fams,
         tf -> Collections.nCopies(fams.size(), tf.createSqlType(SqlTypeName.ANY)),
         i -> "VALUE", i -> true);
+    // requiresOrder=false：UDAF 允许作无 ORDER BY 的窗口聚合（如
+    // COUNT(DISTINCT x) OVER ()）；作普通分组聚合不受该标志影响
     return new SqlUserDefinedAggFunction(new SqlIdentifier(name, SqlParserPos.ZERO),
         SqlKind.OTHER_FUNCTION, ret, null, meta,
-        AggregateFunctionImpl.create(impl), true, false, Optionality.IGNORED);
+        AggregateFunctionImpl.create(impl), false, false, Optionality.IGNORED);
   }
 
   /** 注册进引擎操作符表的本地函数（名字即 SQL 可见名；与标准表无同名冲突）。
@@ -202,6 +242,10 @@ final class SqlRewrites {
       udf("CONCAT_WS", "concatWs3", List.of(SqlTypeFamily.STRING, SqlTypeFamily.ANY,
           SqlTypeFamily.ANY, SqlTypeFamily.ANY), SqlTypeName.VARCHAR, ARG0_NULLABLE),
       udf("REVERSE", "reverse", List.of(SqlTypeFamily.STRING), SqlTypeName.VARCHAR, ARG0_NULLABLE),
+      TRANSLATE_FN,
+      udf("SOUNDEX", "soundex", List.of(SqlTypeFamily.STRING), SqlTypeName.VARCHAR, ARG0_NULLABLE),
+      udf("LTRIM", "ltrim", List.of(SqlTypeFamily.STRING), SqlTypeName.VARCHAR, ARG0_NULLABLE),
+      udf("RTRIM", "rtrim", List.of(SqlTypeFamily.STRING), SqlTypeName.VARCHAR, ARG0_NULLABLE),
       udf("IFNULL", "ifnull", List.of(SqlTypeFamily.ANY, SqlTypeFamily.ANY),
           SqlTypeName.ANY, ARG0_NULLABLE),
       FLOOR_UNIT_FN, CEIL_UNIT_FN, OVERLAY_FN_3, OVERLAY_FN_4, INITCAP_FN,
@@ -268,6 +312,8 @@ final class SqlRewrites {
       case "concatWs2" -> new Class<?>[]{String.class, Object.class, Object.class};
       case "concatWs3" -> new Class<?>[]{String.class, Object.class, Object.class, Object.class};
       case "reverse" -> new Class<?>[]{String.class};
+      case "translate" -> new Class<?>[]{String.class, String.class, String.class};
+      case "soundex", "ltrim", "rtrim" -> new Class<?>[]{String.class};
       default -> {
         if (impl.startsWith("greatest") || impl.startsWith("least")) {
           yield nOf(Object.class, arity);
@@ -318,15 +364,36 @@ final class SqlRewrites {
       "OUTER", "NATURAL", "ON", "APPLY");
 
   /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES /
-   * LISTAGG ON OVERFLOW ERROR / REGEXP。各改写仅在能安全识别边界时生效，
-   * 否则原样返回交由解析器/校验器报真实错误。 */
+   * LISTAGG ON OVERFLOW ERROR / REGEXP / 语句尾分号剥离。各改写仅在能安全识别
+   * 边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
   static String preprocess(String sql) {
+    sql = preprocessTrailingSemicolon(sql);
     sql = preprocessTop(sql);
     sql = preprocessSemiAntiJoin(sql);
     sql = preprocessFetchWithTies(sql);
     sql = preprocessListaggOverflowError(sql);
     sql = preprocessRegexp(sql);
     return sql;
+  }
+
+  /** 语句尾分号剥离（仅活字符位置的分号 + 尾随空白；可多重）：绝大多数驱动/工具
+   * 允许语句带尾分号，Calcite 解析器不接受。语句内部的分号（多语句）保留，
+   * 仍由解析器按多语句拒绝。 */
+  private static String preprocessTrailingSemicolon(String sql) {
+    boolean[] live = liveMask(sql);
+    int end = sql.length();
+    while (end > 0) {
+      int e = end - 1;
+      while (e >= 0 && Character.isWhitespace(sql.charAt(e))) {
+        e--;
+      }
+      if (e >= 0 && sql.charAt(e) == ';' && live[e]) {
+        end = e;
+      } else {
+        break;
+      }
+    }
+    return end == sql.length() ? sql : sql.substring(0, end);
   }
 
   private static final Pattern LISTAGG_OVERFLOW_ERROR =
@@ -786,6 +853,35 @@ final class SqlRewrites {
               ? new SqlBasicCall(MEDIAN_FN, ops, call.getParserPosition())
               : call;
         }
+        if (upper.equals("IIF")) {
+          return rewriteIif(call);
+        }
+        if (upper.equals("ISNULL")) {
+          return rewriteIsnull(call);
+        }
+        if (upper.equals("ILIKE") || upper.equals("NOT ILIKE")) {
+          return rewriteIlike(call);
+        }
+        if (upper.equals("ANY_VALUE") || upper.equals("MODE")) {
+          // MySQL ANY_VALUE / Oracle MODE：本地 UDAF（ANY_VALUE 取首见非 NULL，
+          // MODE 取众数、并列取最小值）
+          List<SqlNode> ops = call.getOperandList();
+          return ops.size() == 1
+              ? new SqlBasicCall(upper.equals("ANY_VALUE") ? ANY_VALUE_FN : MODE_FN,
+                  ops, call.getParserPosition())
+              : call;
+        }
+        if (upper.equals("ARRAY_AGG")) {
+          return rewriteArrayAgg(call);
+        }
+        if (upper.equals("TRANSLATE") || upper.equals("TRANSLATE3")) {
+          // Oracle/PostgreSQL 三参 TRANSLATE：与标准表 SqlTranslateFunction 同名
+          // 重载消解冲突（解析器挂 TRANSLATE3 名），统一按名改挂本地实现
+          List<SqlNode> ops = call.getOperandList();
+          return ops.size() == 3
+              ? new SqlBasicCall(TRANSLATE_FN, ops, call.getParserPosition())
+              : call;
+        }
         if (call.getKind() == SqlKind.WITHIN_GROUP) {
           return rewriteWithinGroup(call);
         }
@@ -857,6 +953,98 @@ final class SqlRewrites {
     return call.getOperator().getName().equalsIgnoreCase("NOT RLIKE")
         ? new SqlBasicCall(SqlStdOperatorTable.NOT, List.of(regexp), pos)
         : regexp;
+  }
+
+  /** IIF(cond, t, f)（SQL Server 方言，未注册于标准操作符表）→ CASE WHEN cond
+   * THEN t ELSE f END（语义等价）。 */
+  private static SqlNode rewriteIif(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 3) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlNodeList whens = new SqlNodeList(pos);
+    whens.add(ops.get(0));
+    SqlNodeList thens = new SqlNodeList(pos);
+    thens.add(ops.get(1));
+    return new SqlCase(pos, null, whens, thens, ops.get(2));
+  }
+
+  /** ISNULL(a, b)（SQL Server 方言）→ COALESCE(a, b)（NULL 语义一致）。 */
+  private static SqlNode rewriteIsnull(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2) {
+      return call;
+    }
+    return new SqlBasicCall(SqlStdOperatorTable.COALESCE, ops, call.getParserPosition());
+  }
+
+  /** {@code a ILIKE p / a NOT ILIKE p}（PostgreSQL 大小写不敏感 LIKE，校验器未注册）→
+   * {@code LOWER(a) [NOT] LIKE LOWER(p)}（等价：两侧同折叠后匹配）。 */
+  private static SqlNode rewriteIlike(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlNode like = new SqlBasicCall(SqlStdOperatorTable.LIKE, List.of(
+        new SqlBasicCall(SqlStdOperatorTable.LOWER, List.of(ops.get(0)), pos),
+        new SqlBasicCall(SqlStdOperatorTable.LOWER, List.of(ops.get(1)), pos)), pos);
+    return call.getOperator().getName().equalsIgnoreCase("NOT ILIKE")
+        ? new SqlBasicCall(SqlStdOperatorTable.NOT, List.of(like), pos)
+        : like;
+  }
+
+  /** ARRAY_AGG(x [ORDER BY o])（引擎不支持 ARRAY 值类型透出）→ CROSSDB_ARRAY_AGG(x)
+   * （{@code "[v1, v2, ...]"} 字符串渲染、按值升序保证确定性）；ORDER BY 与取值
+   * 表达式一致时升序内置于 UDAF、直接去包装，其余排序变体保留 WITHIN GROUP 形态
+   * （Calcite 对 UDAF 不强制输入有序，排序尽力而为）。 */
+  private static SqlNode rewriteArrayAgg(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.isEmpty()) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlNode value = ops.get(0);
+    SqlNodeList order = ops.size() > 1 && ops.get(1) instanceof SqlNodeList list
+        ? list : null;
+    SqlNode agg = new SqlBasicCall(ARRAY_AGG_FN, List.of(value), pos);
+    // SqlNode.equals 为恒等语义，排序项与取值表达式的一致性按打印形态比较
+    if (order == null || (order.size() == 1
+        && order.get(0).toString().equalsIgnoreCase(value.toString()))) {
+      return agg;
+    }
+    return new SqlBasicCall(new SqlWithinGroupOperator(), List.of(agg, order), pos);
+  }
+
+  /** AGG(x) FILTER (WHERE c) → AGG(CASE WHEN c THEN x END)：跳 NULL 语义的聚合上
+   * 等价（SUM/COUNT/AVG/MIN/MAX 及本地 UDAF）；COUNT(*) 的星号操作数换为常量 1；
+   * DISTINCT 量化符保留（COUNT 的去重变体直接换挂本地 CROSSDB_COUNT_DISTINCT）。
+   * 多操作数（LISTAGG 等）形态返回 null，保留原样交校验器报错。 */
+  private static SqlNode filterToCase(SqlCall agg, SqlNode cond, SqlParserPos pos) {
+    List<SqlNode> ops = agg.getOperandList();
+    SqlNode arg;
+    if (ops.size() == 1 && ops.get(0) instanceof SqlIdentifier id && id.isStar()) {
+      arg = SqlLiteral.createExactNumeric("1", pos);
+    } else if (ops.size() == 1) {
+      arg = ops.get(0);
+    } else {
+      return null;
+    }
+    SqlNodeList whens = new SqlNodeList(pos);
+    whens.add(cond);
+    SqlNodeList thens = new SqlNodeList(pos);
+    thens.add(arg);
+    SqlNode wrapped =
+        new SqlCase(pos, null, whens, thens, SqlLiteral.createNull(pos));
+    SqlLiteral quantifier =
+        agg instanceof SqlBasicCall basic ? basic.getFunctionQuantifier() : null;
+    if (quantifier != null && agg.getOperator().getName().equalsIgnoreCase("COUNT")
+        && org.apache.calcite.sql.SqlSelectKeyword.DISTINCT
+            == quantifier.getValueAs(org.apache.calcite.sql.SqlSelectKeyword.class)) {
+      return new SqlBasicCall(COUNT_DISTINCT_FN, List.of(wrapped), pos);
+    }
+    return new SqlBasicCall(agg.getOperator(), List.of(wrapped), pos, quantifier);
   }
 
   /** 行构造器不等比较（Enumerable 运行时不实现 ROW 类型排序比较）→ 按标准 SQL
@@ -1001,6 +1189,8 @@ final class SqlRewrites {
    * <ul>
    *   <li>PERCENTILE_CONT(p) WITHIN GROUP (ORDER BY x) → CROSSDB_PERCENTILE_CONT(x, p)
    *   （Enumerable 无原生实现）；</li>
+   *   <li>PERCENTILE_DISC(p) WITHIN GROUP (ORDER BY x) → CROSSDB_PERCENTILE_DISC(x, p)
+   *   （离散百分位，Enumerable 无原生实现）；</li>
    *   <li>LISTAGG(DISTINCT x, sep) WITHIN GROUP (ORDER BY x) → CROSSDB_LISTAGG(x, sep)
    *   （原生 LISTAGG DISTINCT 计划期 AIOOBE；排序内置为按值升序，故要求 ORDER BY
    *   与取值表达式一致，否则保留原形态交由校验器报错）；</li>
@@ -1017,6 +1207,15 @@ final class SqlRewrites {
       List<SqlNode> aggOps = agg.getOperandList();
       if (aggOps.size() == 1) {
         return new SqlBasicCall(PERCENTILE_CONT_FN,
+            List.of(order.get(0), aggOps.get(0)), pos);
+      }
+      return within;
+    }
+    if (agg.getOperator() == PERCENTILE_DISC_FN || agg.getKind() == SqlKind.PERCENTILE_DISC
+        || agg.getOperator().getName().equalsIgnoreCase("PERCENTILE_DISC")) {
+      List<SqlNode> aggOps = agg.getOperandList();
+      if (aggOps.size() == 1) {
+        return new SqlBasicCall(PERCENTILE_DISC_FN,
             List.of(order.get(0), aggOps.get(0)), pos);
       }
       return within;
@@ -1043,7 +1242,11 @@ final class SqlRewrites {
   }
 
   /** 窗口聚合改写：CUME_DIST/PERCENT_RANK 用 RANK/COUNT(*) 等价表达；
-   * NTH_VALUE 换成本地窗口聚合（帧内第 n 行）；其余原样。 */
+   * NTH_VALUE 换成本地窗口聚合（帧内第 n 行）；
+   * FILTER（与 OVER 组合时校验器拒绝「OVER must be applied to aggregate function」）→
+   * 等价 CASE 包参改写；IGNORE NULLS（FIRST_VALUE/LAST_VALUE）→ 本地非 NULL 端点
+   * 窗口聚合；COUNT(DISTINCT x)（EnumerableWindow 静默丢弃 DISTINCT 量化符）→
+   * 本地去重计数窗口聚合；其余原样。 */
   private static SqlNode rewriteOver(SqlCall over) {
     List<SqlNode> ops = over.getOperandList();
     if (ops.size() != 2 || !(ops.get(0) instanceof SqlCall agg)
@@ -1051,6 +1254,51 @@ final class SqlRewrites {
       return over;
     }
     SqlParserPos pos = over.getParserPosition();
+    // AGG(x) FILTER (WHERE c) OVER w → AGG(CASE WHEN c THEN x END) OVER w：
+    // 跳 NULL 语义的聚合（SUM/COUNT/AVG/MIN/MAX 及本地 UDAF）上两者等价。
+    // 注意解析树上 std 聚合尚未绑定（kind=OTHER_FUNCTION），isAggregator() 为
+    // false，须按名白名单 + 已绑定操作符共同判定
+    if (agg.getKind() == SqlKind.FILTER) {
+      List<SqlNode> fops = agg.getOperandList();
+      if (fops.size() == 2 && fops.get(0) instanceof SqlCall inner) {
+        String innerName = inner.getOperator().getName().toUpperCase();
+        if (inner.getOperator().isAggregator() || innerName.equals("SUM")
+            || innerName.equals("COUNT") || innerName.equals("AVG")
+            || innerName.equals("MIN") || innerName.equals("MAX")) {
+          SqlNode rewritten = filterToCase(inner, fops.get(1), pos);
+          if (rewritten != null) {
+            return over(rewritten, w, pos);
+          }
+        }
+      }
+      return over;   // 无法安全改写的形态保留，交校验器报真实错误
+    }
+    // FIRST_VALUE/LAST_VALUE(x) IGNORE NULLS OVER w → 本地首/末非 NULL 端点聚合；
+    // 仅在 OVER 语境下改写（裸 IGNORE NULLS 无窗口本就非法）。LEAD/LAG 等保留。
+    if (agg.getKind() == SqlKind.IGNORE_NULLS && agg.getOperandList().size() == 1
+        && agg.getOperandList().get(0) instanceof SqlCall inner
+        && inner.getOperandList().size() == 1) {
+      String name = inner.getOperator().getName().toUpperCase();
+      if (name.equals("FIRST_VALUE") || name.equals("LAST_VALUE")) {
+        return over(new SqlBasicCall(
+            name.equals("FIRST_VALUE") ? FIRST_VALUE_NN_FN : LAST_VALUE_NN_FN,
+            inner.getOperandList(), inner.getParserPosition()), w, pos);
+      }
+      return over;
+    }
+    // COUNT(DISTINCT x) OVER w：EnumerableWindow 静默丢弃 DISTINCT（得到 COUNT(*)
+    // 语义的错误结果），改挂本地去重计数 UDAF 修正
+    if (agg instanceof SqlBasicCall basic
+        && basic.getFunctionQuantifier() != null
+        && org.apache.calcite.sql.SqlSelectKeyword.DISTINCT
+            == basic.getFunctionQuantifier()
+                .getValueAs(org.apache.calcite.sql.SqlSelectKeyword.class)
+        && agg.getOperator().getName().equalsIgnoreCase("COUNT")
+        && agg.getOperandList().size() == 1
+        && !(agg.getOperandList().get(0) instanceof SqlIdentifier id && id.isStar())) {
+      return over(new SqlBasicCall(COUNT_DISTINCT_FN, agg.getOperandList(),
+          agg.getParserPosition()), w, pos);
+    }
     switch (agg.getOperator().getName().toUpperCase()) {
       case "CUME_DIST" -> {        // CUME_DIST() OVER w == RANK() OVER w / COUNT(*) OVER (同分区、无排序)
         return new SqlBasicCall(SqlStdOperatorTable.DIVIDE, List.of(
