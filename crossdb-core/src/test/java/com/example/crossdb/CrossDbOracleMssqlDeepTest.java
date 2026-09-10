@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -274,9 +273,8 @@ class CrossDbOracleMssqlDeepTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: LEVEL 伪列（层次深度），需 CONNECT BY 改写透出层级，待支持")
-    void levelPseudocolumn() throws Exception {
+    @Test void levelPseudocolumn() throws Exception {
+      // LEVEL 伪列由 CONNECT BY → 递归 CTE 改写的 level 列承载：ceo=1，ann/ben=2，cid=3
       try (CrossDb db = core()) {
         assertEquals(List.of("1,1", "2,2", "3,2", "4,3"), rows(db,
             "SELECT id, LEVEL FROM userdb.emps START WITH mgr_id IS NULL "
@@ -369,20 +367,18 @@ class CrossDbOracleMssqlDeepTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: TOP n PERCENT（SQL Server），解析器不支持，待支持")
-    void topPercent() throws Exception {
+    @Test void topPercent() throws Exception {
+      // TOP 25 PERCENT：4 行 × 25% 向上取整 = 1 行
       try (CrossDb db = core()) {
         assertEquals(List.of("100"), rows(db,
             "SELECT TOP 25 PERCENT id FROM orderdb.orders ORDER BY id"));
       }
     }
 
-    @Test
-    @Disabled("待支持: TOP n WITH TIES（SQL Server），解析器不支持（FETCH WITH TIES 已支持），待支持")
-    void topWithTies() throws Exception {
+    @Test void topWithTies() throws Exception {
+      // TOP 1 WITH TIES：user_id 最小值组（=1）并列行 100、102 全保留
       try (CrossDb db = core()) {
-        assertEquals(List.of("100", "102"), rows(db,
+        assertEquals(List.of("100,1", "102,1"), rows(db,
             "SELECT TOP 1 WITH TIES id, user_id FROM orderdb.orders ORDER BY user_id"));
       }
     }

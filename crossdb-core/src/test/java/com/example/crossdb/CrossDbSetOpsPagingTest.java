@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -359,9 +358,8 @@ class CrossDbSetOpsPagingTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: EXCEPT/INTERSECT 的 MINUS 关键字别名（Oracle），待支持")
-    void minusKeywordAlias() throws Exception {
+    @Test void minusKeywordAlias() throws Exception {
+      // Oracle 的 MINUS 关键字 ≡ EXCEPT DISTINCT（LENIENT 一致性下解析器直接支持）
       try (CrossDb db = core()) {
         assertEquals(List.of("3"), rows(db,
             "SELECT id FROM userdb.users MINUS SELECT user_id FROM orderdb.orders"));

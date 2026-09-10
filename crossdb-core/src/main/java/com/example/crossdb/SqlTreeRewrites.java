@@ -27,7 +27,8 @@ import java.util.List;
 
 import static com.example.crossdb.LocalOperators.*;
 
-/** 解析树改写：表达式级 shuttle（方言函数 → 本地 UDF 挂载 / 等价标准形态）+ USING
+/** 解析树改写：表达式级 shuttle（方言函数 → 本地 UDF 挂载 / 等价标准形态，含
+ * POSSTR（DB2）挂 INSTR 实现与 SUBSTRING 的 n<1 标准裁剪语义修正）+ USING
  * 展开、别名列清单的 FROM 级改写（FromRewriter）。本地操作符常量定义见
  * LocalOperators。 */
 final class SqlTreeRewrites {
@@ -132,6 +133,15 @@ final class SqlTreeRewrites {
           return new SqlBasicCall(
               call.getOperandList().size() == 2 ? INSTR2_FN : INSTR3_FN,
               call.getOperandList(), call.getParserPosition());
+        }
+        if (upper.equals("POSSTR") && call.getOperandList().size() == 2) {
+          // POSSTR(str, substr)（DB2）→ INSTR 本地 UDF（参数序一致：串在前、子串在后）
+          return new SqlBasicCall(INSTR2_FN, call.getOperandList(),
+              call.getParserPosition());
+        }
+        if (upper.equals("SUBSTRING")) {
+          // SUBSTRING(x FROM n [FOR m]) 的标准 n<1 裁剪语义修正
+          return rewriteSubstring(call);
         }
         if (upper.equals("LENGTH") && call.getOperandList().size() == 1) {
           // LENGTH（MySQL/PG 常用名，Calcite 仅注册 CHAR_LENGTH）→ CHAR_LENGTH
@@ -355,6 +365,56 @@ final class SqlTreeRewrites {
           new SqlBasicCall(SqlStdOperatorTable.LN, List.of(ops.get(0)), pos)), pos);
     }
     return call;
+  }
+
+  /** SUBSTRING(x FROM n [FOR m]) 标准裁剪语义修正：SQL 标准（PostgreSQL/SQL Server/
+   * DB2 同）在 n<1 时取「窗口 [n, n+m-1] 与串 [1, len] 的交集」——起点夹到 1、长度
+   * 相应缩减（PG: SUBSTRING('abc' FROM 0 FOR 2) = 'a'）；而 Calcite 本地实现与 H2
+   * 仅把起点夹到 1 不缩长度（得 'ab'）、MySQL 对 n≤0 直接得空串——三方不一。
+   * 改写为各后端求值一致的标准形态：n 为 ≥1 整数字面量时不改（各后端语义一致、
+   * 保下推）；否则起点夹 {@code CASE WHEN n<1 THEN 1 ELSE n END}，长度按
+   * {@code m+n-clamp(n)}（负值夹 0，FOR 0 → 空串）等价缩放。2 参形态仅夹起点。 */
+  private static SqlNode rewriteSubstring(SqlCall call) {
+    List<SqlNode> ops = call.getOperandList();
+    if (ops.size() != 2 && ops.size() != 3) {
+      return call;
+    }
+    SqlParserPos pos = call.getParserPosition();
+    SqlNode from = ops.get(1);
+    Long fromLit = integerLiteral(from);
+    if (fromLit != null && fromLit >= 1) {
+      return call;
+    }
+    SqlNode from2 = fromLit != null
+        ? SqlLiteral.createExactNumeric("1", pos)     // 字面量 n<1：常量折叠
+        : clampCase(from, "1", pos);
+    if (ops.size() == 2) {
+      return new SqlBasicCall(SqlStdOperatorTable.SUBSTRING,
+          List.of(ops.get(0), from2), pos);
+    }
+    SqlNode len = ops.get(2);
+    Long lenLit = integerLiteral(len);
+    if (fromLit != null && lenLit != null) {
+      // 双字面量：FOR max(m+n-1, 0)（窗口整段在串前 → 空串）
+      long folded = Math.max(lenLit + fromLit - 1, 0);
+      return new SqlBasicCall(SqlStdOperatorTable.SUBSTRING, List.of(ops.get(0), from2,
+          SqlLiteral.createExactNumeric(Long.toString(folded), pos)), pos);
+    }
+    // len' = m + n - clamp(n)：n≥1 → m；n<1 → m+n-1（与起点夹取互补）
+    SqlNode lenRaw = new SqlBasicCall(SqlStdOperatorTable.MINUS, List.of(
+        new SqlBasicCall(SqlStdOperatorTable.PLUS, List.of(len, from), pos), from2), pos);
+    return new SqlBasicCall(SqlStdOperatorTable.SUBSTRING,
+        List.of(ops.get(0), from2, clampCase(lenRaw, "0", pos)), pos);
+  }
+
+  /** CASE WHEN e < 1 THEN literal ELSE e END（数值夹取；NULL 保持 NULL 三值语义）。 */
+  private static SqlNode clampCase(SqlNode e, String literal, SqlParserPos pos) {
+    SqlNodeList whens = new SqlNodeList(pos);
+    whens.add(new SqlBasicCall(SqlStdOperatorTable.LESS_THAN,
+        List.of(e, SqlLiteral.createExactNumeric("1", pos)), pos));
+    SqlNodeList thens = new SqlNodeList(pos);
+    thens.add(SqlLiteral.createExactNumeric(literal, pos));
+    return new SqlCase(pos, null, whens, thens, e);
   }
 
   /** STRCMP(a, b)（MySQL）→ CASE：任一 NULL 得 NULL；a=b 得 0、a<b 得 -1、

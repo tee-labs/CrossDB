@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -101,10 +100,9 @@ class CrossDbWindowDeepTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: NTILE(n) 窗口分桶（Calcite 校验器注册但 EnumerableWindow 运行时未实现），待支持")
-    void ntileBuckets() throws Exception {
+    @Test void ntileBuckets() throws Exception {
       try (CrossDb db = core()) {
+        // 4 行分 2 桶：前 ceil(4/2)-1 桶多一行 → 1,1,2,2
         assertEquals(List.of("100,1", "101,1", "102,2", "103,2"), rows(db,
             "SELECT id, NTILE(2) OVER (ORDER BY id) FROM orderdb.orders ORDER BY id"));
       }
@@ -263,12 +261,16 @@ class CrossDbWindowDeepTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: LAG/LEAD 导航（Calcite EnumerableWindow 对默认偏移运行时未实现完整），待验证后启用")
-    void lagLeadOffsets() throws Exception {
+    @Test void lagLeadOffsets() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals(List.of("100,NULL", "101,20", "102,20", "103,20"), rows(db,
+        // LAG/LEAD 取前一/后一行的 amount（amounts: 10,20,5,1）
+        assertEquals(List.of("100,NULL", "101,10", "102,20", "103,5"), rows(db,
             "SELECT id, LAG(amount) OVER (ORDER BY id) FROM orderdb.orders ORDER BY id"));
+        assertEquals(List.of("100,20", "101,5", "102,1", "103,NULL"), rows(db,
+            "SELECT id, LEAD(amount) OVER (ORDER BY id) FROM orderdb.orders ORDER BY id"));
+        // 显式偏移 + 缺省值：行号 ≤ 偏移时取缺省
+        assertEquals(List.of("100,0", "101,0", "102,10", "103,20"), rows(db,
+            "SELECT id, LAG(amount, 2, 0) OVER (ORDER BY id) FROM orderdb.orders ORDER BY id"));
       }
     }
 

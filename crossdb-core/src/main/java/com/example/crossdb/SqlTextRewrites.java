@@ -8,15 +8,16 @@ import java.util.regex.Pattern;
 import static com.example.crossdb.SqlText.*;
 
 /** 语句级 SQL 文本预处理：解析器不认识的方言子句/关键字在进入解析器之前改写为
- * 等价的标准语法形态（TOP n、LEFT SEMI/ANTI JOIN、WITH TIES、FETCH FIRST n
- * PERCENT、GROUPS 帧、REGEXP、STRAIGHT_JOIN、LISTAGG ON OVERFLOW、尾分号）；
- * 位运算与 DIV 的 token 级改写委托给 BitwiseDivRewrites。各改写仅在能安全
+ * 等价的标准语法形态（TOP n [PERCENT|WITH TIES]、LEFT SEMI/ANTI JOIN、WITH TIES、
+ * FETCH FIRST n PERCENT、GROUPS 帧、REGEXP、STRAIGHT_JOIN、LISTAGG ON OVERFLOW、
+ * 尾分号）；位运算与 DIV 的 token 级改写委托给 BitwiseDivRewrites。各改写仅在能安全
  * 识别边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
 final class SqlTextRewrites {
   private SqlTextRewrites() {}
 
   private static final Pattern TOP = Pattern.compile(
-      "(?is)^(\\s*SELECT\\s+(?:DISTINCT\\s+|ALL\\s+)?)TOP\\s*\\(?\\s*(\\d+)\\s*\\)?");
+      "(?is)^(\\s*SELECT\\s+(?:DISTINCT\\s+|ALL\\s+)?)TOP\\s*\\(?\\s*(\\d+(?:\\.\\d+)?)\\s*\\)?"
+          + "(\\s*PERCENT\\b|\\s*WITH\\s+TIES\\b)?");
   private static final Pattern SEMI_ANTI_JOIN = Pattern.compile(
       "(?i)\\bLEFT\\s+(SEMI|ANTI)\\s+JOIN\\b");
   private static final Pattern FETCH_WITH_TIES = Pattern.compile(
@@ -26,11 +27,11 @@ final class SqlTextRewrites {
       "WHERE", "GROUP", "HAVING", "ORDER", "LIMIT", "OFFSET", "FETCH", "UNION",
       "INTERSECT", "EXCEPT", "JOIN", "LEFT", "RIGHT", "INNER", "CROSS", "FULL",
       "OUTER", "NATURAL", "ON", "APPLY");
-  /** 语句级预处理入口：TOP n / LEFT SEMI・ANTI JOIN / FETCH FIRST .. WITH TIES /
-   * LISTAGG ON OVERFLOW ERROR / REGEXP / STRAIGHT_JOIN / 语句尾分号剥离，及本轮的
-   * 方言族（DATE_DIFF 改名、STRUCT 点访问、LIST_CONTAINS、(+) 外连接、CONNECT BY、
-   * GROUP BY ALL、* EXCLUDE、位运算/DIV、XOR）。各改写仅在能安全识别边界时生效，
-   * 否则原样返回交由解析器/校验器报真实错误。 */
+  /** 语句级预处理入口：TOP n [PERCENT|WITH TIES] / LEFT SEMI・ANTI JOIN /
+   * FETCH FIRST .. WITH TIES / LISTAGG ON OVERFLOW ERROR / REGEXP / STRAIGHT_JOIN /
+   * 语句尾分号剥离，及本轮的方言族（DATE_DIFF 改名、STRUCT 点访问、LIST_CONTAINS、
+   * (+) 外连接、CONNECT BY、GROUP BY ALL、* EXCLUDE、位运算/DIV、XOR）。各改写仅在
+   * 能安全识别边界时生效，否则原样返回交由解析器/校验器报真实错误。 */
   static String preprocess(String sql) {
     return preprocess(sql, ColumnHints.EMPTY);
   }
@@ -487,11 +488,14 @@ final class SqlTextRewrites {
   /** CONNECT BY 层次查询（Oracle）→ 递归 CTE 等价改写：
    * {@code SELECT .. FROM t WHERE f START WITH s CONNECT BY NOCYCLE PRIOR p = c}
    * →
-   * {@code WITH crossdb_cte AS (SELECT q.*, 1 lvl FROM t q WHERE s
-   * UNION ALL SELECT q.*, lvl+1 FROM t q JOIN crossdb_cte c ON q.c = c.p
-   * WHERE c.lvl < 100) SELECT .. FROM crossdb_cte q WHERE f}。
+   * {@code WITH crossdb_cte AS (SELECT q.*, 1 AS level FROM t q WHERE s
+   * UNION ALL SELECT q.*, level+1 FROM t q JOIN crossdb_cte c ON q.c = c.p
+   * WHERE c.level < 100) SELECT .. FROM crossdb_cte q WHERE f}。
+   * LEVEL 伪列由 CTE 的 {@code level} 列承载（外层 SELECT/WHERE/ORDER BY 对
+   * LEVEL 的裸引用或别名限定引用均自然解析；基表自身含 level 列时与之冲突，
+   * 该形态保留原样交校验器报真实错误）。
    * 边界：单表 FROM（可带别名）、连接条件为 PRIOR 标记的裸/限定列简单等值、
-   * WHERE 为层次后过滤（Oracle 语义）；NOCYCLE 由 lvl 上限防护（无环数据不受
+   * WHERE 为层次后过滤（Oracle 语义）；NOCYCLE 由 level 上限防护（无环数据不受
    * 影响）。其余形态保留原样交解析器报错。 */
   private static String preprocessConnectBy(String sql) {
     boolean[] live = liveMask(sql);
@@ -596,14 +600,14 @@ final class SqlTextRewrites {
     String bareParent = parentCol.substring(parentCol.lastIndexOf('.') + 1).trim();
     String bareChild = childCol.substring(childCol.lastIndexOf('.') + 1).trim();
     StringBuilder cte = new StringBuilder("WITH RECURSIVE crossdb_cte AS (SELECT ").append(qual)
-        .append(".*, 1 AS crossdb_lvl FROM ").append(fromItem);
+        .append(".*, 1 AS level FROM ").append(fromItem);
     if (startCond != null) {
       cte.append(" WHERE ").append(startCond);
     }
-    cte.append(" UNION ALL SELECT ").append(qual).append(".*, crossdb_lvl + 1 FROM ")
+    cte.append(" UNION ALL SELECT ").append(qual).append(".*, level + 1 FROM ")
         .append(fromItem).append(" JOIN crossdb_cte ON ").append(qual).append('.')
         .append(bareChild).append(" = crossdb_cte.").append(bareParent)
-        .append(" WHERE crossdb_cte.crossdb_lvl < 100")
+        .append(" WHERE crossdb_cte.level < 100")
         .append(") ").append(sel.replaceFirst("(?is)^\\s*SELECT\\s+", "SELECT "))
         .append(" FROM crossdb_cte").append(alias == null ? "" : " " + alias);
     if (filter != null) {
@@ -1552,7 +1556,10 @@ final class SqlTextRewrites {
   }
 
   /** 语句级 TOP n 改写为末尾 FETCH FIRST n ROWS ONLY（语义：有 ORDER BY 取前 n 行、
-   * 无 ORDER BY 任取 n 行，与 T-SQL TOP 一致）。不匹配则原样返回。 */
+   * 无 ORDER BY 任取 n 行，与 T-SQL TOP 一致）。T-SQL 扩展形态顺次归一到标准改写族：
+   * TOP n PERCENT → FETCH FIRST n PERCENT ROWS ONLY（后续 preprocessFetchPercent
+   * 按 CEILING(n% × 总行数) 取前缀）；TOP n WITH TIES → FETCH FIRST n ROWS WITH
+   * TIES（后续 preprocessFetchWithTies 按前 n 去重键组展开）。不匹配则原样返回。 */
   private static String preprocessTop(String sql) {
     Matcher m = TOP.matcher(sql);
     if (!m.find()) {
@@ -1566,7 +1573,10 @@ final class SqlTextRewrites {
     } else {
       trimmed = rest;
     }
-    return m.group(1) + trimmed + " FETCH FIRST " + m.group(2) + " ROWS ONLY" + semi;
+    String tail = m.group(3) == null ? " ROWS ONLY"
+        : m.group(3).trim().regionMatches(true, 0, "PERCENT", 0, 7)
+            ? " PERCENT ROWS ONLY" : " ROWS WITH TIES";
+    return m.group(1) + trimmed + " FETCH FIRST " + m.group(2) + tail + semi;
   }
 
   /** LEFT SEMI/ANTI JOIN（Calcite 解析器不支持的语法）→ 等价相关 APPLY：

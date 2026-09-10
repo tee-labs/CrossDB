@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -292,10 +291,9 @@ class CrossDbExprMatrixTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: SUBSTRING(x FROM n<1 FOR m) 的标准裁剪语义（PG 返回裁剪后的前 m-(1-n) 字符；Calcite 本地实现按 Java 下标不裁剪），待支持")
-    void substringFromBeforeOneClamp() throws Exception {
+    @Test void substringFromBeforeOneClamp() throws Exception {
       try (CrossDb db = core()) {
+        // 标准（PG/SQL Server/DB2）n<1 裁剪：窗口 [0,1] ∩ [1,3] = 首字符
         assertEquals(List.of("a"), row1(db, "SUBSTRING('abc' FROM 0 FOR 2)"));
       }
     }
@@ -307,11 +305,11 @@ class CrossDbExprMatrixTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: POSSTR(str, substr)（DB2）未注册于操作符表，待支持")
-    void posstrCandidate() throws Exception {
+    @Test void posstrCandidate() throws Exception {
       try (CrossDb db = core()) {
-        assertEquals(List.of("3"), row1(db, "POSSTR('banana', 'na')"));
+        // POSSTR(str, substr)（DB2）：串在前、子串在后（与 INSTR 参数序一致）
+        assertEquals(List.of("3,0"), row1(db,
+            "POSSTR('banana', 'na'), POSSTR('banana', 'xy')"));
       }
     }
 

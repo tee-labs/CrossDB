@@ -20,7 +20,7 @@
 ## 快速开始
 
 ```bash
-mvn test                                                     # 1243 个 JUnit 单元测试（两个模块；11 个 @Disabled("待支持: …") 兼容性用例按设计跳过）
+mvn test                                                     # 1243 个 JUnit 单元测试（两个模块，0 失败 0 跳过；历史 11 个 @Disabled 兼容性用例已全部修复启用）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
 # 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
 # 非 UTC 时区的机器请加 -DargLine="-Duser.timezone=UTC"（TIMESTAMP 按 UTC 墙钟承载）
@@ -163,7 +163,9 @@ safeMode 与 FULL JOIN 的补充边界：
 
 ## 单元测试覆盖
 
-  1243 个测试分十八组（其中 11 个以 `@Disabled("待支持: …")` 标记的兼容性用例暂跳过，作为后续修复清单）：
+  1243 个测试分十八组（历史各批 `@Disabled("待支持: …")` 待支持用例——含第七批 11 个：
+  SUBSTRING FROM<1 裁剪语义、POSSTR、NTILE、LAG/LEAD、MINUS 关键字、LEVEL 伪列、
+  TOP n PERCENT、TOP n WITH TIES、GROUPING SETS、ROLLUP、CUBE——均已修复启用，当前 0 跳过）：
 
 - `GuardedTest`：熔断阈值（放行/超限拒绝）、fetchSize/maxRows/setQueryTimeout、SQL 与行数统计、在途语句取消注册表；
 - `BindJoinExecTest`：流式执行器（多批次并发、去重合批、NULL key、LEFT/RIGHT 行序、FULL 反连接（含内表 NULL key 不丢行）、复合键 tuple-IN 与 OR 降级、按需拉批、排序淘汰、SEMI/ANTI 输出形态、SQL 失败传播、WHERE 构造形态与超限分片、safeMode 下反连接拦截/放行、tuple-IN 方言判定表）；
@@ -177,9 +179,9 @@ safeMode 与 FULL JOIN 的补充边界：
 - `CrossDbExprMatrixTest`：sqllogictest 风格表达式求值矩阵——算术/精度（整除截断、DECIMAL 标度、模符号、DIV 零）、三值逻辑与比较（AND/OR/NOT 矩阵、IS DISTINCT FROM、IN 含 NULL、BETWEEN SYMMETRIC、行构造器比较）、字符串函数（LENGTH/SUBSTRING/POSITION/LOCATE/INSTR/SUBSTRING_INDEX/REPLACE/REVERSE/LPAD/RPAD/LEFT/RIGHT/CONCAT 族/OVERLAY/TRANSLATE/INITCAP/SOUNDEX/CHR/LIKE/ILIKE/RLIKE/SIMILAR TO）、数值函数（CEIL/FLOOR/ROUND 矩阵、LN/LOG/POWER/SQRT、MOD 浮点、CAST 矩阵、TRY_CAST）、位运算与逻辑 XOR、CASE/DECODE/IIF/NVL/ISNULL、时间函数矩阵（EXTRACT、DATE±n、TIMESTAMPDIFF 单位矩阵、DATE_FORMAT/TO_CHAR/NEXT_DAY/ADD_MONTHS/MONTHS_BETWEEN/LAST_DAY）、列上 NULL 语义（聚合跳 NULL、排序 NULLS、分组 NULL 桶）；
 - `CrossDbWindowDeepTest`：窗口函数深测——排名族（ROW_NUMBER/RANK/DENSE_RANK/PERCENT_RANK/CUME_DIST、跨库 JOIN 上排名）、聚合窗口（累计/分区/移动均值/ROWS 边界组合/RANGE 对等组/窗口表达式运算）、导航族（FIRST_VALUE/LAST_VALUE 默认帧与 UNBOUNDED、NTH_VALUE 帧内、IGNORE NULLS）、WINDOW 命名复用、QUALIFY、GROUPS 帧（CURRENT ROW/1 PRECEDING/EXCLUDE CURRENT ROW）、派生表窗口与聚合套聚合屏障；
 - `CrossDbJoinMatrixTest`：跨库 JOIN 矩阵——键类型矩阵（int/string/decimal/date/timestamp/boolean、CAST 对齐）、复合键（双列/三列/NULL 侧）、外连接族（LEFT/RIGHT/FULL、NULL 侧过滤即反半、三表嵌套 LEFT）、半反连接族（EXISTS/NOT EXISTS/IN/NOT IN/LEFT SEMI・ANTI/双重否定）、多表（三/四表星型链式、自连接、镜像分片 DATE 键与全列 NATURAL）、相关子查询（标量 SELECT/WHERE、LATERAL、三库 EXISTS）、下推形态断言（Bind Join IN 下推、驱动侧谓词传播、Top-N LIMIT 下推）与非等值回退正确性；
-- `CrossDbSetOpsPagingTest`：集合运算与分页——UNION 族（ALL 保重/DISTINCT 去重/首分支列名/表达式分支）、INTERSECT/EXCEPT（DISTINCT 与 ALL 多重集、交换律、左结合、括号优先级）、分页（LIMIT/OFFSET、`LIMIT a,b`、FETCH FIRST/NEXT 等价、越界/LIMIT 0/LIMIT ALL、WITH TIES 并列组、PERCENT、并集分页、子查询内 LIMIT、EXISTS 内 LIMIT）、DISTINCT 组合（多列、含 NULL、COUNT DISTINCT、类型放宽分支）、边界（列数不匹配拒绝、非输出列排序拒绝、MINUS 关键字候选）；
-- `CrossDbOracleMssqlDeepTest`：Oracle/SQL Server 方言深测——条件（DECODE 数对/NULL 匹配、NVL/NVL2/ISNULL/IIF 嵌套）、Oracle 日期函数矩阵（ADD_MONTHS/MONTHS_BETWEEN/LAST_DAY/NEXT_DAY 全星期与缩写/DATE±n/TO_CHAR/INSTR 起点）、CONNECT BY 变体（全树/子树/子句双序/无 NOCYCLE/PREVOR 反侧/别名/WHERE 层次后过滤/列投影/LEVEL 候选）、(+) 旧式外连接（右侧/左侧/复合条件/多匹配/复合键）、TOP 形态（ORDER BY/无序/括号/DISTINCT/PERCENT・WITH TIES 候选）、字符串与整除补充；
-- `CrossDbAggModernHardeningTest`：聚合分析深测 + 现代 SQL + 引擎加固——聚合矩阵（SUM/MIN/MAX/AVG、COUNT 变体、空组、DISTINCT 聚合、HAVING 矩阵、分组表达式/序数、聚合排序、聚合套聚合修复回归、MEDIAN/PERCENTILE_CONT/DISC 分位、LISTAGG/STRING_AGG、BOOL 族、ARRAY_AGG、ANY_VALUE/MODE、ARG_MIN/MAX、FILTER、VAR_POP、多参 COUNT、GROUPING SETS/ROLLUP/CUBE 候选）、现代 SQL（QUALIFY 多窗口、EXCLUDE 多列、TRY_CAST 矩阵、STRUCT 多字段、LIST_CONTAINS、date_diff 单位矩阵、REGEXP_REPLACE、ON OVERFLOW 剥离、XOR 列上与优先级）、加固矩阵（safeMode 全表拉取逐库拒绝/Bind Join 内表放行/双侧过滤放行、JOIN 行数熔断、只读拒绝清单、explain/analyze、元数据与 typed getter NULL 语义、findColumn 大小写、配置校验、schema 重名、单遍流式消费）；
+- `CrossDbSetOpsPagingTest`：集合运算与分页——UNION 族（ALL 保重/DISTINCT 去重/首分支列名/表达式分支）、INTERSECT/EXCEPT（DISTINCT 与 ALL 多重集、交换律、左结合、括号优先级、MINUS 关键字别名）、分页（LIMIT/OFFSET、`LIMIT a,b`、FETCH FIRST/NEXT 等价、越界/LIMIT 0/LIMIT ALL、WITH TIES 并列组、PERCENT、并集分页、子查询内 LIMIT、EXISTS 内 LIMIT）、DISTINCT 组合（多列、含 NULL、COUNT DISTINCT、类型放宽分支）、边界（列数不匹配拒绝、非输出列排序拒绝）；
+- `CrossDbOracleMssqlDeepTest`：Oracle/SQL Server 方言深测——条件（DECODE 数对/NULL 匹配、NVL/NVL2/ISNULL/IIF 嵌套）、Oracle 日期函数矩阵（ADD_MONTHS/MONTHS_BETWEEN/LAST_DAY/NEXT_DAY 全星期与缩写/DATE±n/TO_CHAR/INSTR 起点）、CONNECT BY 变体（全树/子树/子句双序/无 NOCYCLE/PREVOR 反侧/别名/WHERE 层次后过滤/列投影/LEVEL 伪列）、(+) 旧式外连接（右侧/左侧/复合条件/多匹配/复合键）、TOP 形态（ORDER BY/无序/括号/DISTINCT/PERCENT/WITH TIES）、字符串与整除补充；
+- `CrossDbAggModernHardeningTest`：聚合分析深测 + 现代 SQL + 引擎加固——聚合矩阵（SUM/MIN/MAX/AVG、COUNT 变体、空组、DISTINCT 聚合、HAVING 矩阵、分组表达式/序数、聚合排序、聚合套聚合修复回归、MEDIAN/PERCENTILE_CONT/DISC 分位、LISTAGG/STRING_AGG、BOOL 族、ARRAY_AGG、ANY_VALUE/MODE、ARG_MIN/MAX、FILTER、VAR_POP、多参 COUNT、GROUPING SETS/ROLLUP/CUBE）、现代 SQL（QUALIFY 多窗口、EXCLUDE 多列、TRY_CAST 矩阵、STRUCT 多字段、LIST_CONTAINS、date_diff 单位矩阵、REGEXP_REPLACE、ON OVERFLOW 剥离、XOR 列上与优先级）、加固矩阵（safeMode 全表拉取逐库拒绝/Bind Join 内表放行/双侧过滤放行、JOIN 行数熔断、只读拒绝清单、explain/analyze、元数据与 typed getter NULL 语义、findColumn 大小写、配置校验、schema 重名、单遍流式消费）；
 - `CrossDbAutoConfigurationTest`：Spring 配置绑定与 Customizer 装配。
 
 自检 Main 覆盖同场景的运行时串联验证（含 ANTI 下推、只读拦截、分片 Top-N）。

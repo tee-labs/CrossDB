@@ -1,6 +1,5 @@
 package com.example.crossdb;
 
-import org.junit.jupiter.api.Disabled;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Nested;
 import org.junit.jupiter.api.Test;
@@ -267,30 +266,27 @@ class CrossDbAggModernHardeningTest {
       }
     }
 
-    @Test
-    @Disabled("待支持: GROUPING SETS 分组集合（SQL 标准），待支持")
-    void groupingSetsForm() throws Exception {
+    @Test void groupingSetsForm() throws Exception {
+      // GROUPING SETS ((user_id), ())：按 user_id 分组（15/21）+ 总计组（36，键补 NULL）
       try (CrossDb db = core()) {
-        assertEquals(List.of("1,15", "2,21", "NULL,36", "1,2", "2,2"), rows(db,
+        assertEquals(List.of("1,15", "2,21", "NULL,36"), rows(db,
             "SELECT user_id, SUM(amount) FROM orderdb.orders "
                 + "GROUP BY GROUPING SETS ((user_id), ()) ORDER BY 1 NULLS LAST"));
       }
     }
 
-    @Test
-    @Disabled("待支持: ROLLUP 分组上卷（SQL 标准），待支持")
-    void rollupForm() throws Exception {
+    @Test void rollupForm() throws Exception {
+      // ROLLUP (user_id) ≡ GROUPING SETS ((user_id), ())：2 分组 + 1 总计 = 3 行
       try (CrossDb db = core()) {
         assertEquals(3, rows(db,
             "SELECT user_id, SUM(amount) FROM orderdb.orders GROUP BY ROLLUP (user_id)").size());
       }
     }
 
-    @Test
-    @Disabled("待支持: CUBE 分组立方（SQL 标准），待支持")
-    void cubeForm() throws Exception {
+    @Test void cubeForm() throws Exception {
+      // CUBE (user_id, amount) ≡ 全部投影分组集合：4(双键) + 2(user_id) + 4(amount) + 1(总计) = 11
       try (CrossDb db = core()) {
-        assertEquals(4, rows(db,
+        assertEquals(11, rows(db,
             "SELECT user_id, amount FROM orderdb.orders GROUP BY CUBE (user_id, amount)").size());
       }
     }
