@@ -40,6 +40,7 @@ final class Guarded {
 
   private static Connection connectionProxy(Connection target, int fetchSize, long maxRows,
       String schema, Stats stats, int queryTimeout) {
+    enableOracleSynonyms(target);
     return (Connection) Proxy.newProxyInstance(Guarded.class.getClassLoader(),
         new Class<?>[]{Connection.class},
         (proxy, method, args) -> {
@@ -109,6 +110,40 @@ final class Guarded {
           }
           return result;
         });
+  }
+
+  /** Oracle 同义词元数据开关（反射解析 {@code oracle.jdbc.OracleConnection#
+   * setIncludeSynonyms}，不引入 ojdbc 依赖；classpath 无 ojdbc 时为 null）。
+   * Oracle JDBC 默认 includeSynonyms=false：getColumns 对同义词名返回空列集，而
+   * Calcite 的 JdbcSchema 枚举表不过滤表类型（types=null），会把 getTables 列出的
+   * 同义词注册成零列行型的表——SELECT * 恰好因「空投影恒等 star」透传可执行，
+   * 但任何列引用（WHERE/SELECT 列清单）都校验失败 Column not found。对 CrossDb
+   * 经由此 DataSource 拿到的 Oracle 连接统一开启，使同义词取得与真实表一致的
+   * 列元数据。连接池返回的代理未实现 OracleConnection 接口时静默跳过（此时可在
+   * 池配置中直接设 includeSynonyms=true）。 */
+  private static final Method ORACLE_INCLUDE_SYNONYMS = lookupOracleIncludeSynonyms();
+
+  private static Method lookupOracleIncludeSynonyms() {
+    try {
+      return Class.forName("oracle.jdbc.OracleConnection")
+          .getMethod("setIncludeSynonyms", boolean.class);
+    } catch (ReflectiveOperationException e) {
+      return null;   // classpath 无 ojdbc：非 Oracle 源库
+    }
+  }
+
+  private static void enableOracleSynonyms(Connection target) {
+    if (ORACLE_INCLUDE_SYNONYMS == null
+        || !ORACLE_INCLUDE_SYNONYMS.getDeclaringClass().isInstance(target)) {
+      return;
+    }
+    try {
+      ORACLE_INCLUDE_SYNONYMS.invoke(target, true);
+    } catch (ReflectiveOperationException | RuntimeException e) {
+      if (Boolean.getBoolean("crossdb.debug")) {
+        System.err.println("Guarded: 开启 Oracle includeSynonyms 失败: " + e);
+      }
+    }
   }
 
   private static Object invoke(Method method, Object target, Object[] args) throws Exception {

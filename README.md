@@ -58,6 +58,7 @@ try (CrossDb db = new CrossDb()) {
 | 流式拉取 | 源库语句统一 `setFetchSize(fetchSize)`，逐批读取；Bind Join 外表流式读窗口、输出流式 yield，驱动侧不驻全量 |
 | 超时传播 | `queryTimeout` 传播到每条源库语句，慢查询由 JDBC 驱动在源库侧取消，防连接池耗尽 |
 | 级联取消 | `db.cancel()`（外部线程调用）遍历在途源库语句逐个 `Statement.cancel()`，主动掐断慢查询；语句关闭自动注销注册表 |
+| Oracle 同义词 | 注册的 Oracle 源在取连接时自动开启 `includeSynonyms`（反射调用 `OracleConnection#setIncludeSynonyms`，不引入 ojdbc 依赖；非 Oracle 连接跳过）。Oracle JDBC 默认对同义词名的 `getColumns` 返回空列集，引擎会注册出零列幽灵表——`SELECT *` 恰好透传可执行，但任何列引用（如 `WHERE t.col = …`）都报 Column not found。若连接池返回的代理未实现 `OracleConnection` 接口，请在池配置中自行设置 `includeSynonyms=true` |
 | 只读硬化 | 仅放行查询语句（SELECT、UNION/INTERSECT/EXCEPT、ORDER BY/LIMIT 与 WITH CTE 包裹）；INSERT/UPDATE/DELETE/MERGE/DDL/SET 等在解析层直接拒绝——写入请直接操作各源库 |
 | safeMode | `db.safeMode()` 后，计划中出现「无过滤条件的源库全表拉取」直接抛 `CrossDbUnsafeQueryException`（Bind Join 内表例外，其必带 key IN 过滤；聚合视为有归约）——OLTP 零容忍全表拉取。FULL JOIN 的反连接 SQL 在运行期生成：外表零行/全 NULL key 时反连接将无过滤全表拉取内表，safeMode 会在执行期拒绝（见「Bind Join 当前边界」） |
 | explain / analyze | `explain(sql)` 返回优化后物理计划；`analyze(sql)` 执行并输出各源库实际下发的 SQL、每库网络行数、Bind Join 批次与拉取行数（注意：analyze 会消费整个结果集） |

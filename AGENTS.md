@@ -117,6 +117,15 @@ mvn -q -DskipTests install && mvn -q -pl crossdb-example compile exec:java    # 
   the derived-table alias must omit the `AS` keyword for Oracle (table aliases
   reject AS — ORA-00933; only column aliases may use it). Never hardcode
   `... ) AS "T"` in new hand-built source SQL — go through `wrapInner`.
+- Oracle synonyms: Calcite's `JdbcSchema` enumerates with table types = null, so
+  Oracle lists synonym rows and registers them, but ojdbc's default
+  `includeSynonyms=false` makes `getColumns` return nothing for a synonym name —
+  a zero-column ghost table (`SELECT *` passes through vacuously-star, any column
+  reference fails validation). `Guarded.enableOracleSynonyms` reflectively flips
+  `OracleConnection#setIncludeSynonyms(true)` on every connection it hands out
+  (no ojdbc dependency, non-Oracle connections skipped); unit-tested via the
+  test-classpath stub `oracle/jdbc/OracleConnection.java`. Pooled proxies that
+  don't implement the interface need the property set at the pool level.
 - `CrossDb.plan()` runs `fixNestedJdbcAggregates` after planning: JdbcAggregate
   over JdbcAggregate would be rendered by JdbcImplementor as one nested-agg SQL
   (`SUM(SUM(x))`) that H2 rejects (upstream JDBC-adapter flaw); the fix

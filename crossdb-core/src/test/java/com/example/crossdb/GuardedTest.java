@@ -3,6 +3,7 @@ package com.example.crossdb;
 import org.junit.jupiter.api.Test;
 
 import javax.sql.DataSource;
+import java.lang.reflect.Proxy;
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.ResultSet;
@@ -110,5 +111,72 @@ class GuardedTest {
     assertEquals(1, schema.sqls.size(), "应记录下发 SQL");
     assertTrue(schema.sqls.iterator().next().contains("users"),
         String.valueOf(schema.sqls));
+  }
+
+  /** Oracle 同义词元数据：getConnection 取到的 Oracle 连接须开启
+   * includeSynonyms（默认 false 时 getColumns 对同义词返回空列集，Calcite 会
+   * 注册出零列行型的表——SELECT * 透传可跑、列引用校验失败）。 */
+  @Test void oracleConnectionEnablesSynonymMetadata() throws Exception {
+    java.util.List<Boolean> synonyms = new java.util.ArrayList<>();
+    Connection oracleLike = (Connection) Proxy.newProxyInstance(
+        GuardedTest.class.getClassLoader(),
+        new Class<?>[]{Connection.class, oracle.jdbc.OracleConnection.class},
+        (p, m, a) -> {
+          if (m.getName().equals("setIncludeSynonyms")) {
+            synonyms.add((Boolean) a[0]);
+            return null;
+          }
+          return defaultValue(m.getReturnType());
+        });
+    DataSource oracleDs = (DataSource) Proxy.newProxyInstance(
+        GuardedTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+        (p, m, a) -> m.getName().equals("getConnection")
+            ? oracleLike : defaultValue(m.getReturnType()));
+    DataSource wrapped = Guarded.wrap(oracleDs, 100, 10, "oradb", new Stats(), 0);
+    try (Connection c = wrapped.getConnection()) {
+      assertFalse(c.isClosed());
+    }
+    assertEquals(java.util.List.of(Boolean.TRUE), synonyms,
+        "Oracle 连接获取时应开启 includeSynonyms");
+  }
+
+  /** 非 Oracle 连接（H2）不受反射开关影响：现有 wrap 系列用例均以 H2 走通同一
+   * 代码路径（classpath 存在测试桩 oracle.jdbc.OracleConnection 时 isInstance
+   * 拦下），此处显式断言一次开关未被误开。 */
+  @Test void nonOracleConnectionSkipsSynonymToggle() throws Exception {
+    Connection h2 = Fixtures.USERS.getConnection();
+    DataSource ds = (DataSource) Proxy.newProxyInstance(
+        GuardedTest.class.getClassLoader(), new Class<?>[]{DataSource.class},
+        (p, m, a) -> m.getName().equals("getConnection")
+            ? h2 : defaultValue(m.getReturnType()));
+    DataSource wrapped = Guarded.wrap(ds, 100, 10, "userdb", new Stats(), 0);
+    try (Connection c = wrapped.getConnection();
+        Statement s = c.createStatement();
+        ResultSet rs = s.executeQuery("SELECT id FROM users WHERE id = 1")) {
+      assertTrue(rs.next());
+      assertEquals(1, rs.getInt(1));
+    }
+  }
+
+  private static Object defaultValue(Class<?> type) {
+    if (!type.isPrimitive()) {
+      return null;
+    }
+    if (type == boolean.class) {
+      return false;
+    }
+    if (type == long.class) {
+      return 0L;
+    }
+    if (type == float.class) {
+      return 0f;
+    }
+    if (type == double.class) {
+      return 0d;
+    }
+    if (type == char.class) {
+      return '\0';
+    }
+    return 0;
   }
 }
