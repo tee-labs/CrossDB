@@ -12,6 +12,9 @@
     <maven.compiler.release>21</maven.compiler.release>
     <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
     <spring-boot.version>3.2.5</spring-boot.version>
+    <!-- 测试 JVM 固定 UTC：TIMESTAMP 以 epoch millis 按 UTC 墙钟承载（见 Exec/CrossDbFunctions），
+         非 UTC 机器上断言会整体偏移一个时区差 -->
+    <argLine>-Duser.timezone=UTC</argLine>
   </properties>
 
   <modules>

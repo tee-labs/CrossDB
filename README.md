@@ -23,7 +23,7 @@
 mvn test                                                     # 1243 个 JUnit 单元测试（两个模块，0 失败 0 跳过；历史 11 个 @Disabled 兼容性用例已全部修复启用）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
 # 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
-# 非 UTC 时区的机器请加 -DargLine="-Duser.timezone=UTC"（TIMESTAMP 按 UTC 墙钟承载）
+# 测试 JVM 时区已由父 pom 的 <argLine> 固定为 UTC（TIMESTAMP 按 UTC 墙钟承载），任何时区的机器直接 mvn test 即可
 ```
 
 第一个跨库查询（H2 内存库演示，真实库见下）：

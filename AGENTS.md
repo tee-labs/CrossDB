@@ -37,7 +37,7 @@ virtual threads).
 mvn test                                                    # all JUnit 5 tests, both modules (1243; 0 failures / 0 skipped — the former 11-case @Disabled backlog has been fully fixed and re-enabled)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
-# run with -DargLine="-Duser.timezone=UTC" on a non-UTC machine: TIMESTAMP values
+# test-JVM timezone is pinned to UTC by the parent pom's <argLine> property: TIMESTAMP values
 # are carried as epoch millis interpreted as UTC wall time (see Exec / CrossDbFunctions)
 ```
 
@@ -133,7 +133,9 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
 - TIMESTAMP values are carried as epoch millis (Long) interpreted as **UTC wall
   time** through the engine (Exec typed getters, `CROSSDB_FLOOR/CEIL/TIMESTAMPDIFF`,
   CAST-to-VARCHAR rendering). On a non-UTC JVM, wall-clock renderings shift by the
-  zone offset — run tests with `-Duser.timezone=UTC` (CI is UTC Linux).
+  zone offset — the parent pom therefore pins surefire's test JVM to
+  `-Duser.timezone=UTC` via the `argLine` property (plain `mvn test` works on any
+  machine; CI is UTC Linux).
 - safeMode intentionally rejects `COUNT(*)`-over-cross-DB-join shapes: the optimizer
   transposes the aggregate into two single-column pulls and the right side becomes an
   unfiltered full pull. Row-level joins with a driver-side filter pass (inner side
@@ -149,7 +151,8 @@ mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 
   by-name re-lookup; register per-arity distinct names (the GREATEST/LEAST
   precedent: CROSSDB_LOCATE2/CROSSDB_LOCATE3).
 - Dev machines are Windows with no native Maven/JDK; run tests via WSL Ubuntu:
-  `wsl -d Ubuntu -- bash -lc 'cd /mnt/d/CrossDB && JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn test -Duser.timezone=UTC'`.
+  `wsl -d Ubuntu -- bash -lc 'cd /mnt/d/CrossDB && JAVA_HOME=/usr/lib/jvm/java-21-openjdk-amd64 mvn test'`
+  (the pom's argLine already pins the test JVM to UTC).
   CI (`.github/workflows/opencode.yml`) runs an OpenCode
   agent on Linux, triggered by `/oc` comments on issues/PRs. Note: the parent pom
   pins maven-compiler-plugin 3.13.0 because Maven ≤3.8's default compiler plugin
