@@ -15,13 +15,15 @@
 - **IN 列表自适应分片**：单批 key 超过 1000（Oracle IN 列表上限）自动拆为 `IN (...) OR IN (...)`，任意方言安全；
 - **全链路安全护栏**：所有源库拉取带 fetchSize 流式读取、行数熔断、queryTimeout 超时传播与级联取消；内表并发拉取用 **JDK 21 虚拟线程**（按 `parallelism` 限流）；引擎强制只读，safeMode 可进一步拦截全表拉取。
 
-自包含子项目（Maven 多模块：`crossdb-core` + `crossdb-spring-boot-starter`），与本仓库其他部分无关，可随时拆成独立仓库。需要 **JDK 21+** 构建。
+自包含子项目（Maven 多模块：`crossdb-core` + `crossdb-spring-boot-starter` + `crossdb-example`），与本仓库其他部分无关，可随时拆成独立仓库。需要 **JDK 21+** 构建。
 
 ## 快速开始
 
 ```bash
 mvn test                                                     # 1243 个 JUnit 单元测试（两个模块，0 失败 0 跳过；历史 11 个 @Disabled 兼容性用例已全部修复启用）
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # 端到端自检
+mvn -q -DskipTests install                                   # 一次，把 crossdb 装进本地仓库
+mvn -q -pl crossdb-example compile exec:java                 # 验证用示例入口：连两个库跑各类查询（默认内存 H2，可换真实库；exec 不触发编译，改完源码须带 compile）
 # 加 -Dcrossdb.debug=true 可打印物理计划与规则匹配过程
 # 测试 JVM 时区已由父 pom 的 <argLine> 固定为 UTC（TIMESTAMP 按 UTC 墙钟承载），任何时区的机器直接 mvn test 即可
 ```

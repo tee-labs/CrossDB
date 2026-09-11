@@ -27,6 +27,12 @@ virtual threads).
 - `crossdb-spring-boot-starter/` (package `com.example.crossdb.spring`) — Spring Boot 3.x
   autoconfig: `CrossDbProperties` (`crossdb.*` props), `CrossDbCustomizer` (register DataSources),
   `CrossDbAutoConfiguration` (backs off if a `CrossDb` bean is already declared).
+- `crossdb-example/` (package `com.example.crossdb.example`) — manual verification
+  entry point: `ExampleMain.main` registers two in-memory H2 sources (swap-in templates
+  for MySQL/PostgreSQL in comments) and runs pushdown / cross-DB join / aggregate /
+  UNION ALL Top-N / explain / analyze / safeMode demos. Run with
+  `mvn -q -DskipTests install` once, then `mvn -q -pl crossdb-example exec:java`.
+  Not covered by JUnit tests — it is a scratchpad, not a test suite.
 - `README.md` is the authoritative spec. Read it before changing Bind Join rules,
   safety guards, or fallback behavior — especially the section
   「Bind Join 当前边界（触发条件）」.
@@ -36,6 +42,7 @@ virtual threads).
 ```bash
 mvn test                                                    # all JUnit 5 tests, both modules (1243; 0 failures / 0 skipped — the former 11-case @Disabled backlog has been fully fixed and re-enabled)
 mvn -q -pl crossdb-core exec:java -Dexec.mainClass=com.example.crossdb.Main   # end-to-end self-check
+mvn -q -DskipTests install && mvn -q -pl crossdb-example compile exec:java    # manual example entry (two H2 sources; exec skips compile)
 # add -Dcrossdb.debug=true to any run to print physical plans and rule matching
 # test-JVM timezone is pinned to UTC by the parent pom's <argLine> property: TIMESTAMP values
 # are carried as epoch millis interpreted as UTC wall time (see Exec / CrossDbFunctions)

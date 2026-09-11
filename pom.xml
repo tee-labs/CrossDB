@@ -20,6 +20,7 @@
   <modules>
     <module>crossdb-core</module>
     <module>crossdb-spring-boot-starter</module>
+    <module>crossdb-example</module>
   </modules>
 
   <build>
