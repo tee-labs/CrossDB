@@ -235,7 +235,7 @@ class BindJoinRule extends RelOptRule {
         (JavaTypeFactory) leftEnum.getCluster().getTypeFactory())
         .visitRoot(rightJdbcInput).asSelect().toSqlString(convention.dialect).getSql();
     String t = convention.dialect.quoteIdentifier("T");
-    String sqlPrefix = "SELECT * FROM (" + innerSql + ") AS " + t;
+    String sqlPrefix = wrapInner(convention.dialect, innerSql);
     String[] keyCols = java.util.Arrays.stream(rightKeys)
         .mapToObj(i -> t + "." + convention.dialect.quoteIdentifier(rightNames.get(i)))
         .toArray(String[]::new);
@@ -251,6 +251,14 @@ class BindJoinRule extends RelOptRule {
     return EnumerableBindJoin.create(leftEnum, rightEnum, condition, schemaOf(rightScan),
         sqlPrefix, keyCols, leftKeys, rightKeys, colTypes, rightNames.size(), batchSize,
         parallelism, tupleIn, driverSortedByKey(leftEnum, leftKeys), joinType);
+  }
+
+  /** 内表下推 SQL 的外层包装 {@code SELECT * FROM (inner) 别名}。Oracle 的表别名不允许
+   * AS 关键字（仅列别名允许，否则 ORA-00933 SQL 命令未正确结束），其余方言保留 AS。 */
+  static String wrapInner(SqlDialect dialect, String innerSql) {
+    String alias = dialect.quoteIdentifier("T");
+    boolean oracle = dialect.getDatabaseProduct() == SqlDialect.DatabaseProduct.ORACLE;
+    return "SELECT * FROM (" + innerSql + ")" + (oracle ? " " : " AS ") + alias;
   }
 
   /** 驱动侧是否按 join key 有序（collation 前缀恰为 leftKeys）——此时 Bind Join 可做

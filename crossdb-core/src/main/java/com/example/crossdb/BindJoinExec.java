@@ -75,7 +75,8 @@ public final class BindJoinExec {
    *
    * @param left      外表（驱动侧）Enumerable
    * @param dataSource 内表所在库
-   * @param sqlPrefix  内表可下推子树的 SELECT ... FROM (...) AS "T" 前缀
+   * @param sqlPrefix  内表可下推子树的 SELECT ... FROM (...) [AS] "T" 前缀（Oracle 表别名
+   *                   不带 AS 关键字，见 BindJoinRule.wrapInner）
    * @param keyCols    内表 join key 的带引号列引用（如 "T"."USER_ID"），长度 = key 数
    * @param leftKeys   外表行的 key 列下标
    * @param rightKeys  内表行（SELECT * 结果）的 key 列下标

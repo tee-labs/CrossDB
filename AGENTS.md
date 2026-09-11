@@ -113,6 +113,10 @@ mvn -q -DskipTests install && mvn -q -pl crossdb-example compile exec:java    # 
   columns' SqlTypeNames) drives `BindJoinExec.readValue/bindValue` (DATE↔epoch
   days, TIMESTAMP↔epoch millis) for rows, keys and parameters; outer keys are
   normalized with the paired `rightKeys` type.
+- The Bind Join inner-pushdown wrapper SQL is hand-built (`BindJoinRule.wrapInner`):
+  the derived-table alias must omit the `AS` keyword for Oracle (table aliases
+  reject AS — ORA-00933; only column aliases may use it). Never hardcode
+  `... ) AS "T"` in new hand-built source SQL — go through `wrapInner`.
 - `CrossDb.plan()` runs `fixNestedJdbcAggregates` after planning: JdbcAggregate
   over JdbcAggregate would be rendered by JdbcImplementor as one nested-agg SQL
   (`SUM(SUM(x))`) that H2 rejects (upstream JDBC-adapter flaw); the fix
